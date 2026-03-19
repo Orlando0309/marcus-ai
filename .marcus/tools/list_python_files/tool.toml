@@ -1,0 +1,8 @@
+type = "shell"
+description = "List Python files in the current project"
+timeout = 10
+permissions = ["read", "inspect"]
+
+[tool]
+name = "list_python_files"
+description = "List Python files in the project"

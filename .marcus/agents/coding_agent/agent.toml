@@ -1,0 +1,15 @@
+[agent]
+name = "coding_agent"
+role = "coding"
+description = "Autonomous coding agent that writes files, runs builds, fixes errors, and iterates until the task is complete"
+
+[autonomy]
+iteration_limit = 100000
+verification = "detect"
+confirm_writes = false
+
+[rules]
+safe_actions = ["list_files", "read_file", "search_code", "find_symbol", "list_symbols"]
+auto_run_commands = ["go build", "go build ./...", "cargo build", "cargo build 2>&1", "npm run build", "npm run build 2>&1", "ruff check", "ruff check .", "ruff format", "go test", "go test ./...", "go vet", "golangci-lint run", "python -m py_compile", "mvn compile", "gradle build", "make", "cmake --build"]
+write_if = "first_wave"
+step_mode = false

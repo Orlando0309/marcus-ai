@@ -1,0 +1,12 @@
+{
+  "id": "73655ba19043fa2a",
+  "scope": "user",
+  "kind": "feedback",
+  "title": "User preference",
+  "content": "in project folder, I want you to create a full ticket management, related to do list too, with login and all, make sure to use a design pattern for it",
+  "source": "conversation",
+  "tags": [
+    "user-feedback"
+  ],
+  "updated_at": "2026-03-18T20:04:42.5560668Z"
+}

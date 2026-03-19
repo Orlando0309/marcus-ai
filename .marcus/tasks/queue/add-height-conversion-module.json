@@ -1,0 +1,7 @@
+{
+  "id": "add-height-conversion-module",
+  "title": "Add height conversion module",
+  "description": "Create height.py with conversions for m, cm, ft, in, yards",
+  "status": "queue",
+  "updated_at": "2026-03-18T18:25:23.1735675Z"
+}

@@ -1,0 +1,26 @@
+[flow]
+name = "app_plan"
+description = "Plan an application implementation before scaffolding files"
+version = "1.0.0"
+author = "marcus"
+
+[model]
+provider = "ollama"
+model = "glm-5:cloud"
+temperature = 0.2
+max_tokens = 4096
+
+[input]
+requires = ["description"]
+optional = ["stack", "constraints"]
+
+[output]
+format = "text"
+save_to = ""
+
+[behavior]
+stream = false
+confirm_before_apply = true
+auto_fix = false
+
+tools = []

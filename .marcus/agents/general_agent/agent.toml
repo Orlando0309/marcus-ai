@@ -1,0 +1,15 @@
+[agent]
+name = "general_agent"
+role = "general"
+description = "General-purpose conversational agent for questions, analysis, and non-coding tasks"
+
+[autonomy]
+iteration_limit = 100000
+verification = "never"
+confirm_writes = true
+
+[rules]
+safe_actions = ["list_files", "read_file", "search_code", "find_symbol"]
+auto_run_commands = []
+write_if = "never"
+step_mode = true

@@ -1,0 +1,24 @@
+[flow]
+name = "code_edit"
+description = "Edit code files based on a natural language instruction"
+version = "1.0.0"
+author = "marcus"
+
+[model]
+provider = "ollama"
+model = "glm-5:cloud"
+temperature = 0.3
+max_tokens = 4096
+
+[input]
+requires = ["file", "instruction"]
+optional = ["context"]
+
+[output]
+format = "diff"
+save_to = ""
+
+[behavior]
+stream = true
+confirm_before_apply = true
+auto_fix = false

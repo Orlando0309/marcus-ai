@@ -1,0 +1,26 @@
+[flow]
+name = "app_scaffold"
+description = "Generate a safe starter scaffold for a new application"
+version = "1.0.0"
+author = "marcus"
+
+[model]
+provider = "ollama"
+model = "glm-5:cloud"
+temperature = 0.2
+max_tokens = 4096
+
+[input]
+requires = ["description"]
+optional = ["stack", "output_dir"]
+
+[output]
+format = "text"
+save_to = ""
+
+[behavior]
+stream = false
+confirm_before_apply = true
+auto_fix = false
+
+tools = ["write_file", "run_command"]

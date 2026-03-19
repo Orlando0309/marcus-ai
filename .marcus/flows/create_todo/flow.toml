@@ -1,0 +1,26 @@
+[flow]
+name = "create_todo"
+description = "Create a todo list application"
+version = "1.0.0"
+author = "marcus"
+
+[model]
+provider = "ollama"
+model = "glm-5:cloud"
+temperature = 0.3
+max_tokens = 4096
+
+[input]
+requires = ["description"]
+optional = []
+
+[output]
+format = "text"
+save_to = ""
+
+[behavior]
+stream = false
+confirm_before_apply = false
+auto_fix = false
+
+tools = ["write_file", "run_command"]

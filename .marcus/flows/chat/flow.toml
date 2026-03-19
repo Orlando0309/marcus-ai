@@ -1,0 +1,24 @@
+[flow]
+name = "chat"
+description = "Interactive chat conversation with Marcus AI"
+version = "1.0.0"
+author = "marcus"
+
+[model]
+provider = "ollama"
+model = "glm-5:cloud"
+temperature = 0.7
+max_tokens = 4096
+
+[input]
+requires = ["message"]
+optional = ["conversation_history"]
+
+[output]
+format = "text"
+save_to = ""
+
+[behavior]
+stream = false
+confirm_before_apply = false
+auto_fix = false
