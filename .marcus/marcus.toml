@@ -1,0 +1,60 @@
+marcus_version = "1.0.0"
+provider = "ollama"
+model = "glm-5:cloud"
+temperature = 0.3
+max_tokens = 4096
+hot_reload = true
+theme = "marcus-dark"
+
+[project]
+name = "project"
+description = "Reusable Marcus starter configuration"
+
+[session]
+auto_save = true
+auto_resume = true
+max_turns = 200
+
+[context]
+always_include = [
+  ".marcus/context/ARCHITECTURE.md",
+  ".marcus/context/CONVENTIONS.md",
+  ".marcus/context/TASKS.md",
+]
+max_file_bytes = 8192
+max_files_per_prompt = 4
+
+[tools.run_command]
+always_allow = ["go test ./...", "go build ./...", "cargo test", "cargo build", "npm test", "npm run build", "python -m pytest", "python -m compileall -q ."]
+
+[tools.manifest]
+auto_approve_permissions = ["read", "safe", "inspect"]
+
+[provider_runtime]
+cache_enabled = true
+batch_enabled = true
+max_batch_size = 4
+
+[memory]
+recall_limit = 8
+
+[lsp]
+enabled = true
+timeout_seconds = 10
+go_command = "gopls"
+python_command = "pylsp"
+javascript_command = ""
+typescript_command = ""
+
+[autonomy]
+max_iterations = 100000
+retry_budget = 2
+verify_after_apply = true
+
+[isolation]
+enabled = true
+prefer_worktree = false
+risky_file_writes = 4
+
+[runtime]
+default_mode = "build"
