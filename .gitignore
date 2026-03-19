@@ -1,5 +1,7 @@
 .claude
 marcus.exe
+marcus.exe~
+tui_debug.log
 
 .env
 .env.local
