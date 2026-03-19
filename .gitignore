@@ -1,0 +1,18 @@
+.claude
+marcus.exe
+
+.env
+.env.local
+.env.production
+.env.development
+.env.test
+.env.staging
+.env.production
+.env.development
+.env.test
+.env.staging
+
+# Marcus documentation (tracked separately)
+# prd.md
+# CLAUDE.md
+# AGENT.md
