@@ -1,8 +1,9 @@
 package tui
 
 import (
-	"github.com/charmbracelet/lipgloss"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // Styles holds all the styles used in the TUI
@@ -13,6 +14,8 @@ type Styles struct {
 	StatusKey      lipgloss.Style
 	StatusMuted    lipgloss.Style
 	TranscriptPane lipgloss.Style
+	DiffPane       lipgloss.Style
+	DiffTitle      lipgloss.Style
 	Composer       lipgloss.Style
 	Help           lipgloss.Style
 	HelpKey        lipgloss.Style
@@ -53,6 +56,15 @@ func DefaultStyles() Styles {
 			Foreground(lipgloss.Color("#94a3b8")),
 
 		TranscriptPane: lipgloss.NewStyle().Padding(0, 1),
+
+		DiffPane: lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#334155")).
+			Padding(0, 1),
+
+		DiffTitle: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#94a3b8")).
+			Bold(true),
 
 		Composer: lipgloss.NewStyle().
 			BorderTop(true).
