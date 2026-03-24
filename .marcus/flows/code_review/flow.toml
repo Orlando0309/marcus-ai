@@ -1,0 +1,26 @@
+[flow]
+name = "code_review"
+description = "Structured code or change review (risks, tests, style)"
+version = "1.0.0"
+author = "marcus"
+
+[model]
+provider = "ollama"
+model = "qwen3.5:397b-cloud"
+temperature = 0.2
+max_tokens = 4096
+
+[input]
+requires = ["scope"]
+optional = ["constraints", "focus"]
+
+[output]
+format = "text"
+save_to = ""
+
+[behavior]
+stream = true
+confirm_before_apply = false
+auto_fix = false
+
+tools = []

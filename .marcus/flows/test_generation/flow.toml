@@ -1,0 +1,26 @@
+[flow]
+name = "test_generation"
+description = "Draft or extend tests for described code or behavior"
+version = "1.0.0"
+author = "marcus"
+
+[model]
+provider = "ollama"
+model = "qwen3.5:397b-cloud"
+temperature = 0.25
+max_tokens = 4096
+
+[input]
+requires = ["description"]
+optional = ["file", "framework", "style"]
+
+[output]
+format = "text"
+save_to = ""
+
+[behavior]
+stream = true
+confirm_before_apply = true
+auto_fix = false
+
+tools = []

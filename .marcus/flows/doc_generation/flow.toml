@@ -1,0 +1,26 @@
+[flow]
+name = "doc_generation"
+description = "Generate or improve documentation (README, package docs, API notes)"
+version = "1.0.0"
+author = "marcus"
+
+[model]
+provider = "ollama"
+model = "qwen3.5:397b-cloud"
+temperature = 0.3
+max_tokens = 4096
+
+[input]
+requires = ["topic"]
+optional = ["audience", "format", "existing"]
+
+[output]
+format = "text"
+save_to = ""
+
+[behavior]
+stream = true
+confirm_before_apply = true
+auto_fix = false
+
+tools = []
