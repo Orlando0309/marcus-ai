@@ -6,7 +6,7 @@ author = "marcus"
 
 [model]
 provider = "ollama"
-model = "glm-5:cloud"
+model = "qwen3.5:397b-cloud"
 temperature = 0.7
 max_tokens = 4096
 

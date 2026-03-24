@@ -104,6 +104,71 @@ func (b *Broker) Definition(ctx context.Context, language, uri string, line, cha
 	return []Location{single}, nil
 }
 
+// Hover returns plain-text hover content at a position, if any.
+func (b *Broker) Hover(ctx context.Context, language, uri string, line, character int) (string, error) {
+	c, err := b.clientFor(language)
+	if err != nil {
+		return "", err
+	}
+	var raw json.RawMessage
+	if err := c.call(ctx, "textDocument/hover", textDocumentPosition(uri, line, character), &raw); err != nil {
+		return "", err
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var top struct {
+		Contents json.RawMessage `json:"contents"`
+	}
+	if json.Unmarshal(raw, &top) != nil {
+		return "", nil
+	}
+	return strings.TrimSpace(parseHoverContentsRaw(top.Contents)), nil
+}
+
+func parseHoverContentsRaw(contents json.RawMessage) string {
+	if len(contents) == 0 || string(contents) == "null" {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(contents, &s) == nil {
+		return s
+	}
+	var mc struct {
+		Value string `json:"value"`
+	}
+	if json.Unmarshal(contents, &mc) == nil && mc.Value != "" {
+		return mc.Value
+	}
+	var arr []json.RawMessage
+	if json.Unmarshal(contents, &arr) == nil {
+		var b strings.Builder
+		for _, el := range arr {
+			if p := parseHoverContentsRaw(el); p != "" {
+				b.WriteString(p)
+				b.WriteByte('\n')
+			}
+		}
+		return strings.TrimSpace(b.String())
+	}
+	return ""
+}
+
+// Rename returns a workspace edit JSON (LSP WorkspaceEdit) or null.
+func (b *Broker) Rename(ctx context.Context, language, uri string, line, character int, newName string) (json.RawMessage, error) {
+	c, err := b.clientFor(language)
+	if err != nil {
+		return nil, err
+	}
+	params := textDocumentPosition(uri, line, character)
+	params["newName"] = newName
+	var raw json.RawMessage
+	if err := c.call(ctx, "textDocument/rename", params, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 func (b *Broker) References(ctx context.Context, language, uri string, line, character int) ([]Location, error) {
 	c, err := b.clientFor(language)
 	if err != nil {

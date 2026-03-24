@@ -57,7 +57,7 @@ go build -o marcus.exe ./cmd/marcus
 | **Config loader** | Done | `internal/config/` | `~/.marcus/config.toml` + `.marcus/marcus.toml` |
 | **Folder engine** | Done | `internal/folder/` | Discovers flows/tools/agents, hot-reload via fsnotify |
 | **Anthropic provider** | Done | `internal/provider/` | HTTP API implementation |
-| **Ollama provider** | Done | `internal/provider/` | glm-5:cloud tested successfully |
+| **Ollama provider** | Done | `internal/provider/` | qwen3.5:397b-cloud tested successfully |
 | **Tool system** | Done | `internal/tool/` | read_file, write_file, run_command |
 | **Diff engine** | Done | `internal/diff/` | Parse/apply unified diff, ANSI rendering |
 | **Flow engine** | Done | `internal/flow/` | Template rendering, streaming execution |

@@ -153,6 +153,14 @@ func (m *Manager) Recall(query string, limit int) ([]Entry, error) {
 				score += 3
 			}
 		}
+		// Recency boost: entries touched in the last 7 days rank higher.
+		if time.Since(entry.UpdatedAt) < 7*24*time.Hour {
+			score += 2
+		}
+		switch entry.Kind {
+		case "pattern", "decision", "loop-decision":
+			score += 1
+		}
 		if score > 1 || len(queryTokens) == 0 {
 			scoredEntries = append(scoredEntries, scored{Entry: entry, score: score})
 		}
@@ -171,6 +179,63 @@ func (m *Manager) Recall(query string, limit int) ([]Entry, error) {
 		result = append(result, item.Entry)
 	}
 	return result, nil
+}
+
+// AppendEpisodic appends one conversation line to episodic.jsonl (short snippets).
+func (m *Manager) AppendEpisodic(role, content string) error {
+	if m.root == "" {
+		return nil
+	}
+	if err := m.EnsureStructure(); err != nil {
+		return err
+	}
+	content = trim(content, 800)
+	rec, err := json.Marshal(map[string]string{
+		"role": strings.TrimSpace(role),
+		"text": content,
+		"ts":   time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(m.root, "episodic.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(rec, '\n'))
+	return err
+}
+
+// EpisodicSummary returns the last maxLines episodic entries as bullet text.
+func (m *Manager) EpisodicSummary(maxLines int) string {
+	if m.root == "" || maxLines <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(m.root, "episodic.jsonl"))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	raw := strings.TrimSuffix(string(data), "\n")
+	if raw == "" {
+		return ""
+	}
+	lines := strings.Split(raw, "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	var out []string
+	for _, ln := range lines {
+		var row map[string]string
+		if json.Unmarshal([]byte(ln), &row) != nil {
+			continue
+		}
+		out = append(out, "- "+row["role"]+": "+trim(row["text"], 200))
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return strings.Join(out, "\n")
 }
 
 func (m *Manager) Summary(query string, limit int) string {

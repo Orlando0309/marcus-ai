@@ -105,14 +105,15 @@ func (fe *FlowExecutor) Execute(ctx context.Context, flowName string, data Templ
 
 // getProvider returns the provider instance based on flow config
 func (fe *FlowExecutor) getProvider(providerName string, modelName string) (provider.Provider, error) {
-	switch providerName {
-	case "anthropic":
-		return provider.NewAnthropicProvider()
-	case "ollama":
-		return provider.NewOllamaProvider(modelName)
-	default:
-		return provider.NewOllamaProvider(modelName)
+	name := strings.TrimSpace(providerName)
+	if name == "" && fe.cfg != nil {
+		name = fe.cfg.Provider
 	}
+	var fb []string
+	if fe.cfg != nil {
+		fb = fe.cfg.ProviderFallbacks
+	}
+	return provider.Stack(name, modelName, fb)
 }
 
 // executeBlocking executes a non-streaming flow

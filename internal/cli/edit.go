@@ -62,42 +62,26 @@ func NewEditCmd() *cobra.Command {
 				fmt.Printf("Using flow: %s\n", flow.Name)
 			}
 
-			// Initialize provider from flow config
-			var prov provider.Provider
+			pname := cfg.Provider
+			model := cfg.Model
 			if flow != nil {
-				switch flow.Model.Provider {
-				case "anthropic":
-					prov, err = provider.NewAnthropicProvider()
-					if err != nil {
-						return fmt.Errorf("anthropic provider: %w", err)
-					}
-				case "ollama":
-					prov, err = provider.NewOllamaProvider(flow.Model.Model)
-					if err != nil {
-						return fmt.Errorf("ollama provider: %w", err)
-					}
-				default:
-					prov, err = provider.NewOllamaProvider(flow.Model.Model)
-					if err != nil {
-						return fmt.Errorf("ollama provider: %w", err)
-					}
+				if strings.TrimSpace(flow.Model.Provider) != "" {
+					pname = flow.Model.Provider
 				}
-			} else {
-				// Fallback to config
-				switch cfg.Provider {
-				case "anthropic":
-					prov, err = provider.NewAnthropicProvider()
-					if err != nil {
-						return fmt.Errorf("anthropic provider: %w", err)
-					}
-				case "ollama":
-					prov, err = provider.NewOllamaProvider("")
-					if err != nil {
-						return fmt.Errorf("ollama provider: %w", err)
-					}
-				default:
-					return fmt.Errorf("unsupported provider: %s", cfg.Provider)
+				if strings.TrimSpace(flow.Model.Model) != "" {
+					model = flow.Model.Model
 				}
+			}
+			prov, err := provider.Stack(pname, model, cfg.ProviderFallbacks)
+			if err != nil {
+				return fmt.Errorf("provider: %w", err)
+			}
+
+			temperature := cfg.Temperature
+			maxTokens := cfg.MaxTokens
+			if flow != nil {
+				temperature = flow.Model.Temperature
+				maxTokens = flow.Model.MaxTokens
 			}
 
 			// Build prompt - ask for unified diff format
@@ -115,16 +99,6 @@ Provide ONLY a unified diff showing the changes. Use this exact format:
 +line to add
 
 Do not include any explanation text - just the diff.`, filePath, instruction, string(content))
-
-			// Use flow's model config or fallback to config
-			model := "glm-5:cloud"
-			temperature := 0.3
-			maxTokens := 4096
-			if flow != nil {
-				model = flow.Model.Model
-				temperature = flow.Model.Temperature
-				maxTokens = flow.Model.MaxTokens
-			}
 
 			fmt.Printf("Sending request to %s (%s)...\n", prov.Name(), model)
 

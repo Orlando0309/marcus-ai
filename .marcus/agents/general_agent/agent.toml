@@ -9,7 +9,7 @@ verification = "never"
 confirm_writes = true
 
 [rules]
-safe_actions = ["list_files", "read_file", "search_code", "find_symbol"]
+safe_actions = ["list_files", "list_directory", "glob_files", "read_file", "search_code", "find_symbol", "git_operations", "fetch_url", "lsp_definition", "lsp_references", "lsp_hover"]
 auto_run_commands = []
 write_if = "never"
 step_mode = true

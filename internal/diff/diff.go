@@ -16,6 +16,8 @@ type Patch struct {
 	NewLine        int
 	NewLength      int
 	Lines          []PatchLine
+	// NoNewlineAtEOF is set when the diff contains "\ No newline at end of file" after this hunk.
+	NoNewlineAtEOF bool
 }
 
 // PatchLine represents a single line in a diff
@@ -24,23 +26,44 @@ type PatchLine struct {
 	Content string
 }
 
-// ParseUnifiedDiff parses a unified diff format string
+var hunkHeaderRE = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
+
+// ParseUnifiedDiff parses unified diff text into hunks. File headers (---/+++),
+// diff --git, and similar lines are skipped.
 func ParseUnifiedDiff(diff string) ([]Patch, error) {
 	var patches []Patch
 	scanner := bufio.NewScanner(strings.NewReader(diff))
 
 	var currentPatch *Patch
-	hunkRegex := regexp.MustCompile(`@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
-
-	// Track the last diff line so we can merge continuation lines
 	var lastLine *PatchLine
 
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// Check for hunk header
-		if matches := hunkRegex.FindStringSubmatch(line); matches != nil {
+		if strings.HasPrefix(line, `\`) {
+			if currentPatch != nil && strings.Contains(line, "No newline at end of file") {
+				currentPatch.NoNewlineAtEOF = true
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "--- ") || line == "---" ||
+			strings.HasPrefix(line, "+++ ") || line == "+++" ||
+			strings.HasPrefix(line, "diff ") ||
+			strings.HasPrefix(line, "index ") ||
+			strings.HasPrefix(line, "new file mode") ||
+			strings.HasPrefix(line, "deleted file mode") ||
+			strings.HasPrefix(line, "similarity index") ||
+			strings.HasPrefix(line, "rename from") ||
+			strings.HasPrefix(line, "rename to") ||
+			strings.HasPrefix(line, "Binary files ") {
+			continue
+		}
+
+		if matches := hunkHeaderRE.FindStringSubmatch(line); matches != nil {
 			if currentPatch != nil {
+				if err := validatePatchHeader(currentPatch); err != nil {
+					return nil, err
+				}
 				patches = append(patches, *currentPatch)
 			}
 
@@ -69,116 +92,262 @@ func ParseUnifiedDiff(diff string) ([]Patch, error) {
 			continue
 		}
 
-		if strings.HasPrefix(line, "-") {
-			content := strings.TrimPrefix(line, "-")
-			currentPatch.Lines = append(currentPatch.Lines, PatchLine{Type: "-", Content: content})
-			lastLine = nil
-		} else if strings.HasPrefix(line, "+") {
-			content := strings.TrimPrefix(line, "+")
-			currentPatch.Lines = append(currentPatch.Lines, PatchLine{Type: "+", Content: content})
-			lastLine = nil
-		} else if strings.HasPrefix(line, " ") || line == "" {
-			// Empty context line or explicit space-prefixed line
-			content := strings.TrimPrefix(line, " ")
-			currentPatch.Lines = append(currentPatch.Lines, PatchLine{Type: " ", Content: content})
-			lastLine = nil
-		} else if lastLine != nil {
-			// Continuation line — append to previous diff line's content
-			// This handles cases where the LLM returns "+func" as separate lines
-			lastLine.Content += "\n" + line
-		} else {
-			// Orphan context line (no previous diff line to attach to)
-			currentPatch.Lines = append(currentPatch.Lines, PatchLine{Type: " ", Content: line})
+		if len(line) == 0 {
+			currentPatch.Lines = append(currentPatch.Lines, PatchLine{Type: " ", Content: ""})
+			lastLine = &currentPatch.Lines[len(currentPatch.Lines)-1]
+			continue
+		}
+
+		switch line[0] {
+		case '-':
+			if strings.HasPrefix(line, "---") {
+				continue
+			}
+			currentPatch.Lines = append(currentPatch.Lines, PatchLine{Type: "-", Content: line[1:]})
+			lastLine = &currentPatch.Lines[len(currentPatch.Lines)-1]
+		case '+':
+			if strings.HasPrefix(line, "+++") {
+				continue
+			}
+			currentPatch.Lines = append(currentPatch.Lines, PatchLine{Type: "+", Content: line[1:]})
+			lastLine = &currentPatch.Lines[len(currentPatch.Lines)-1]
+		case ' ':
+			currentPatch.Lines = append(currentPatch.Lines, PatchLine{Type: " ", Content: line[1:]})
+			lastLine = &currentPatch.Lines[len(currentPatch.Lines)-1]
+		default:
+			if lastLine != nil {
+				lastLine.Content += "\n" + line
+			} else {
+				currentPatch.Lines = append(currentPatch.Lines, PatchLine{Type: " ", Content: line})
+				lastLine = &currentPatch.Lines[len(currentPatch.Lines)-1]
+			}
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
 	if currentPatch != nil {
+		if err := validatePatchHeader(currentPatch); err != nil {
+			return nil, err
+		}
 		patches = append(patches, *currentPatch)
 	}
 
 	return patches, nil
 }
 
-// ApplyPatch applies a patch to the original content
+func validatePatchHeader(p *Patch) error {
+	var oldCount, newCount int
+	for _, pl := range p.Lines {
+		switch pl.Type {
+		case "-":
+			oldCount++
+		case "+":
+			newCount++
+		case " ":
+			oldCount++
+			newCount++
+		}
+	}
+	if oldCount != p.OriginalLength {
+		return fmt.Errorf("hunk @@ -%d,%d: old side has %d lines, expected %d",
+			p.OriginalLine, p.OriginalLength, oldCount, p.OriginalLength)
+	}
+	if newCount != p.NewLength {
+		return fmt.Errorf("hunk @@ +%d,%d: new side has %d lines, expected %d",
+			p.NewLine, p.NewLength, newCount, p.NewLength)
+	}
+	return nil
+}
+
+// fileToLines splits text into logical lines. endsWithNewline is true when the
+// original string ended with '\n' (POSIX text file).
+func fileToLines(s string) (lines []string, endsWithNewline bool) {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	endsWithNewline = strings.HasSuffix(s, "\n")
+	t := s
+	if endsWithNewline {
+		t = s[:len(s)-1]
+	}
+	if t == "" {
+		if endsWithNewline {
+			return []string{""}, true
+		}
+		return nil, false
+	}
+	return strings.Split(t, "\n"), endsWithNewline
+}
+
+func linesToFile(lines []string, endsWithNewline bool) string {
+	if len(lines) == 0 {
+		if endsWithNewline {
+			return "\n"
+		}
+		return ""
+	}
+	out := strings.Join(lines, "\n")
+	if endsWithNewline {
+		return out + "\n"
+	}
+	return out
+}
+
+// ApplyPatch applies unified diff hunks in order. Hunk line numbers refer to the
+// file before any hunk is applied; offsets from earlier hunks are tracked.
 func ApplyPatch(original string, patches []Patch) (string, error) {
-	lines := strings.SplitAfter(original, "\n")
-	if len(original) > 0 && !strings.HasSuffix(original, "\n") {
-		lines = append(lines, "")
+	if len(patches) == 0 {
+		return original, nil
 	}
 
-	var result []string
-	lineOffset := 0 // Track how many lines we've added/removed
+	lines, endsNL := fileToLines(original)
+	delta := 0
 
-	for _, patch := range patches {
-		// Adjust patch position based on offset
-		applyLine := patch.OriginalLine - 1 + lineOffset
+	for hi, patch := range patches {
+		oldFromPatch := hunkOldLines(patch)
+		newFromPatch := hunkNewLines(patch)
 
-		if applyLine < 0 || applyLine >= len(lines) {
-			return "", fmt.Errorf("patch line %d out of range (file has %d lines)", patch.OriginalLine, len(lines))
+		insertAt, err := hunkInsertIndex(&patch, len(lines))
+		if err != nil {
+			return "", fmt.Errorf("hunk %d: %w", hi+1, err)
 		}
 
-		// Extract lines to replace
-		replaceCount := patch.OriginalLength
-		if replaceCount > len(lines)-applyLine {
-			replaceCount = len(lines) - applyLine
-		}
-
-		// Build new lines from patch
-		var newLines []string
-		for _, pl := range patch.Lines {
-			if pl.Type != "-" {
-				newLines = append(newLines, pl.Content+"\n")
+		idx := insertAt + delta
+		if patch.OriginalLength > 0 {
+			if idx < 0 || idx > len(lines) {
+				return "", fmt.Errorf("hunk %d: start index %d out of range (len=%d)", hi+1, idx, len(lines))
 			}
+			if idx+patch.OriginalLength > len(lines) {
+				return "", fmt.Errorf("hunk %d: spans past EOF (need %d lines at %d, have %d)",
+					hi+1, patch.OriginalLength, idx, len(lines))
+			}
+			got := lines[idx : idx+patch.OriginalLength]
+			if !stringSliceEqual(got, oldFromPatch) {
+				return "", fmt.Errorf("hunk %d: context mismatch at line %d", hi+1, patch.OriginalLine)
+			}
+			lines = append(lines[:idx], append(newFromPatch, lines[idx+patch.OriginalLength:]...)...)
+		} else {
+			if idx < 0 || idx > len(lines) {
+				return "", fmt.Errorf("hunk %d: insertion index %d out of range (len=%d)", hi+1, idx, len(lines))
+			}
+			lines = append(lines[:idx], append(newFromPatch, lines[idx:]...)...)
 		}
 
-		// Replace old lines with new
-		result = append(result, lines[:applyLine]...)
-		result = append(result, newLines...)
-		result = append(result, lines[applyLine+replaceCount:]...)
-
-		// Update offset
-		lineOffset += len(newLines) - int(patch.OriginalLength)
+		delta += len(newFromPatch) - patch.OriginalLength
 	}
 
-	if len(result) == 0 {
+	outEndsNL := endsNL
+	if len(patches) > 0 {
+		last := patches[len(patches)-1]
+		if last.NoNewlineAtEOF {
+			outEndsNL = false
+		} else if original == "" {
+			// Empty original → only '+' hunks; each line is a full record, POSIX newline at EOF unless marked above.
+			outEndsNL = true
+		}
+	}
+
+	return linesToFile(lines, outEndsNL), nil
+}
+
+func hunkInsertIndex(p *Patch, nLines int) (int, error) {
+	if p.OriginalLength == 0 {
+		if p.OriginalLine == 0 {
+			return 0, nil
+		}
+		if p.OriginalLine < 1 {
+			return 0, fmt.Errorf("invalid old start line %d", p.OriginalLine)
+		}
+		idx := p.OriginalLine - 1
+		if idx > nLines {
+			return 0, fmt.Errorf("insert before line %d but file has %d lines", p.OriginalLine, nLines)
+		}
+		return idx, nil
+	}
+	if p.OriginalLine < 1 {
+		return 0, fmt.Errorf("invalid old start line %d", p.OriginalLine)
+	}
+	return p.OriginalLine - 1, nil
+}
+
+func hunkOldLines(p Patch) []string {
+	var out []string
+	for _, pl := range p.Lines {
+		if pl.Type == "-" || pl.Type == " " {
+			out = append(out, pl.Content)
+		}
+	}
+	return out
+}
+
+func hunkNewLines(p Patch) []string {
+	var out []string
+	for _, pl := range p.Lines {
+		if pl.Type == "+" || pl.Type == " " {
+			out = append(out, pl.Content)
+		}
+	}
+	return out
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// GenerateDiff returns a valid unified diff between two versions of a file.
+// Identical inputs yield an empty string.
+func GenerateDiff(original, modified string) (string, error) {
+	original = strings.ReplaceAll(original, "\r\n", "\n")
+	modified = strings.ReplaceAll(modified, "\r\n", "\n")
+	if original == modified {
 		return "", nil
 	}
 
-	return strings.Join(result, ""), nil
-}
+	oLines, _ := fileToLines(original)
+	nLines, _ := fileToLines(modified)
 
-// GenerateDiff generates a unified diff between two files
-func GenerateDiff(original, new string) (string, error) {
-	return simpleDiff(original, new), nil
-}
+	oldCount := len(oLines)
+	newCount := len(nLines)
 
-// simpleDiff creates a simple line-by-line diff
-func simpleDiff(original, new string) string {
-	origLines := strings.Split(original, "\n")
-	newLines := strings.Split(new, "\n")
+	var b strings.Builder
+	b.WriteString("--- original\n")
+	b.WriteString("+++ modified\n")
 
-	var diff strings.Builder
-	diff.WriteString("--- original\n")
-	diff.WriteString("+++ modified\n")
-
-	maxOrig := len(origLines)
-	maxNew := len(newLines)
-
-	for i := 0; i < maxOrig || i < maxNew; i++ {
-		if i < maxOrig && i < maxNew {
-			if origLines[i] != newLines[i] {
-				diff.WriteString(fmt.Sprintf("@@ line %d @@\n", i+1))
-				diff.WriteString("-" + origLines[i] + "\n")
-				diff.WriteString("+" + newLines[i] + "\n")
-			}
-		} else if i < maxOrig {
-			diff.WriteString("-" + origLines[i] + "\n")
-		} else {
-			diff.WriteString("+" + newLines[i] + "\n")
+	switch {
+	case oldCount == 0 && newCount > 0:
+		fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", newCount)
+		for _, l := range nLines {
+			b.WriteString("+" + l + "\n")
+		}
+	case oldCount > 0 && newCount == 0:
+		fmt.Fprintf(&b, "@@ -1,%d +0,0 @@\n", oldCount)
+		for _, l := range oLines {
+			b.WriteString("-" + l + "\n")
+		}
+	default:
+		fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", oldCount, newCount)
+		for _, l := range oLines {
+			b.WriteString("-" + l + "\n")
+		}
+		for _, l := range nLines {
+			b.WriteString("+" + l + "\n")
 		}
 	}
 
-	return diff.String()
+	if modified != "" && !strings.HasSuffix(modified, "\n") {
+		b.WriteString("\\ No newline at end of file\n")
+	}
+
+	return b.String(), nil
 }
 
 // RenderDiff renders a diff with ANSI colors for terminal display
@@ -186,11 +355,10 @@ func RenderDiff(diff string) string {
 	var rendered strings.Builder
 	scanner := bufio.NewScanner(strings.NewReader(diff))
 
-	// ANSI color codes (ESC is \x1b in Go)
-	green   := "\x1b[32m"
-	red     := "\x1b[31m"
-	cyan    := "\x1b[36m"
-	reset   := "\x1b[0m"
+	green := "\x1b[32m"
+	red := "\x1b[31m"
+	cyan := "\x1b[36m"
+	reset := "\x1b[0m"
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -232,12 +400,12 @@ func ConfirmApply(diff string) bool {
 
 // ApplyPatchToFile reads a file, applies a patch, and writes the result
 func ApplyPatchToFile(path string, patches []Patch) error {
-	original, err := os.ReadFile(path)
+	origBytes, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
 	}
 
-	newContent, err := ApplyPatch(string(original), patches)
+	newContent, err := ApplyPatch(string(origBytes), patches)
 	if err != nil {
 		return fmt.Errorf("apply patch: %w", err)
 	}

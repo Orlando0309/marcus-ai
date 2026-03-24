@@ -2,8 +2,13 @@ package cli
 
 import (
 	"github.com/marcus-ai/marcus/internal/tui"
+	"github.com/marcus-ai/marcus/internal/xlog"
 	"github.com/spf13/cobra"
 )
+
+func init() {
+	xlog.Init()
+}
 
 // NewRootCmd creates the root command for marcus
 func NewRootCmd() *cobra.Command {

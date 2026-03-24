@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/marcus-ai/marcus/internal/config"
@@ -56,11 +57,14 @@ func EstimateTokens(s string) int {
 
 // Snapshot is the assembled prompt context (mirrors ctxpkg.Snapshot).
 type Snapshot struct {
-	Text      string
-	Branch    string
-	Dirty     bool
-	FileHints []string
-	TODOHints []task.TODOHint
+	Text              string
+	Branch            string
+	Dirty             bool
+	FileHints         []string
+	TODOHints         []task.TODOHint
+	EstimatedTokens   int
+	Truncated         bool
+	DroppedSections   []string
 }
 
 // ContextAssembler is the subset of ctxpkg.Assembler that LoopEngine needs.
@@ -80,6 +84,8 @@ type LoopEngine struct {
 	provider      *provider.Runtime
 	cfg           *config.Config
 	baseDir       string
+	goalMu        sync.Mutex
+	goalStack     []string
 }
 
 // LoopState carries the full state of one run or one step.
@@ -87,6 +93,7 @@ type LoopState struct {
 	Iteration    int
 	TaskID       string
 	TaskStatus   string
+	Progress     string
 	Messages     []provider.Message
 	ToolResults  []ToolResultEntry
 	Decisions    []DecisionLogEntry
@@ -188,6 +195,7 @@ func (le *LoopEngine) Run(ctx context.Context, goal, taskID string, maxIteration
 	for iter < maxIterations {
 		iter++
 		state.Iteration = iter
+		state.Progress = fmt.Sprintf("iteration %d: model call", iter)
 
 		// Emit context usage progress
 		pct := state.Budget.Percent()
@@ -234,6 +242,7 @@ func (le *LoopEngine) Run(ctx context.Context, goal, taskID string, maxIteration
 
 		// Update budget with response size
 		state.Budget.EstimatedUsed += resp.Usage.TotalTokens
+		state.Progress = fmt.Sprintf("iteration %d: parse response", iter)
 
 		modelText := resp.Text
 		messages = append(messages, provider.Message{Role: "assistant", Content: modelText})
@@ -282,6 +291,7 @@ func (le *LoopEngine) Run(ctx context.Context, goal, taskID string, maxIteration
 			break
 		}
 
+		state.Progress = fmt.Sprintf("iteration %d: run %d tool(s)", iter, len(resp.ToolCalls))
 		// Execute tool calls
 		for _, tc := range resp.ToolCalls {
 			raw, err := le.toolRunner.Run(ctx, tc.Name, tc.Input)
@@ -327,6 +337,7 @@ func (le *LoopEngine) Step(ctx context.Context, goal, taskID string, messages []
 		Iteration:  0,
 		TaskID:     taskID,
 		TaskStatus: task.StatusActive,
+		Progress:   "step: model call",
 	}
 
 	req := provider.Request{
@@ -344,6 +355,7 @@ func (le *LoopEngine) Step(ctx context.Context, goal, taskID string, messages []
 		return state, fmt.Errorf("provider complete: %w", err)
 	}
 
+	state.Progress = "step: parse response"
 	state.Iteration = 1
 	modelText := resp.Text
 	messages = append(messages, provider.Message{Role: "assistant", Content: modelText})
@@ -380,6 +392,7 @@ func (le *LoopEngine) Step(ctx context.Context, goal, taskID string, messages []
 		return state, nil
 	}
 
+	state.Progress = fmt.Sprintf("step: run %d tool(s)", len(resp.ToolCalls))
 	// Execute tools and append results as user messages
 	for _, tc := range resp.ToolCalls {
 		raw, err := le.toolRunner.Run(ctx, tc.Name, tc.Input)
@@ -420,9 +433,19 @@ type stepEnvelope struct {
 
 func (le *LoopEngine) buildSystemPrompt(goal string) string {
 	var parts []string
-	parts = append(parts, `You are Marcus, a terminal-native coding assistant. Work methodically: read the project map and existing context first, identify the one most relevant file or subsystem, follow the current pattern, make the smallest safe change, and verify the result. Return JSON with "message", "actions", and "tasks" fields. Keep "message" human-readable and concise. Mark tasks active when implementing, done when complete, blocked when stuck.`)
+	parts = append(parts, `You are Marcus, a terminal-native coding assistant. Work methodically: read the project map and existing context first, identify the one most relevant file or subsystem, and prefer a targeted read/search over broad repository scans. Follow the current pattern, make the smallest safe change, verify the result, and capture durable repo facts in the project map when they will help future tasks. Return JSON with "message", "actions", and "tasks" fields. Keep "message" human-readable and concise. Mark tasks active when implementing, done when complete, blocked when stuck.`)
 	if goal != "" {
 		parts = append(parts, fmt.Sprintf("\n\nCurrent Goal: %s", goal))
+	}
+	le.goalMu.Lock()
+	stack := append([]string(nil), le.goalStack...)
+	le.goalMu.Unlock()
+	if len(stack) > 0 {
+		var lines []string
+		for i, g := range stack {
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, g))
+		}
+		parts = append(parts, "\n\nGoal stack:\n"+strings.Join(lines, "\n"))
 	}
 	return strings.Join(parts, "")
 }
@@ -565,7 +588,36 @@ func (le *LoopEngine) logDecision(state *LoopState) {
 			tags = append(tags, "task:"+state.TaskID)
 		}
 		le.memory.Remember("decisions", "loop-decision", fmt.Sprintf("Loop iter %d", d.Iteration), content, "loop-engine", tags...)
+		_ = le.memory.AppendEpisodic("assistant", d.ModelText)
 	}
+}
+
+// PushGoal adds a sub-goal to the stack (most recent listed last).
+func (le *LoopEngine) PushGoal(g string) {
+	g = strings.TrimSpace(g)
+	if g == "" {
+		return
+	}
+	le.goalMu.Lock()
+	defer le.goalMu.Unlock()
+	le.goalStack = append(le.goalStack, g)
+}
+
+// PopGoal removes the last pushed goal.
+func (le *LoopEngine) PopGoal() {
+	le.goalMu.Lock()
+	defer le.goalMu.Unlock()
+	if len(le.goalStack) == 0 {
+		return
+	}
+	le.goalStack = le.goalStack[:len(le.goalStack)-1]
+}
+
+// Goals returns a copy of the goal stack.
+func (le *LoopEngine) Goals() []string {
+	le.goalMu.Lock()
+	defer le.goalMu.Unlock()
+	return append([]string(nil), le.goalStack...)
 }
 
 // ToolRunner returns the tool runner used by this loop engine.

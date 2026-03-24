@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/marcus-ai/marcus/internal/config"
 	"github.com/marcus-ai/marcus/internal/folder"
@@ -125,18 +126,11 @@ func (e *Engine) Stream(ctx context.Context, flowName string, input TemplateData
 		return fmt.Errorf("render template: %w", err)
 	}
 
-	// Get provider
-	var prov provider.Provider
-	switch flow.Model.Provider {
-	case "anthropic":
-		prov, err = provider.NewAnthropicProvider()
-	case "ollama":
-		prov, err = provider.NewOllamaProvider(flow.Model.Model)
-	default:
-		// Default to ollama with configured model
-		prov, err = provider.NewOllamaProvider(flow.Model.Model)
+	pname := strings.TrimSpace(flow.Model.Provider)
+	if pname == "" {
+		pname = e.cfg.Provider
 	}
-
+	prov, err := provider.Stack(pname, flow.Model.Model, e.cfg.ProviderFallbacks)
 	if err != nil {
 		return fmt.Errorf("get provider: %w", err)
 	}
