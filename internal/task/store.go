@@ -226,16 +226,24 @@ func (s *Store) ReconcileTODOHints(paths []string, hints []TODOHint) ([]Task, er
 // Summary renders a short human-readable summary for prompting.
 func (s *Store) Summary() string {
 	tasks, err := s.List()
-	if err != nil || len(tasks) == 0 {
-		return "No durable tasks recorded."
-	}
-
 	var lines []string
-	for i, task := range tasks {
-		if i >= 8 {
-			break
+	if err == nil && len(tasks) > 0 {
+		for i, task := range tasks {
+			if i >= 8 {
+				break
+			}
+			lines = append(lines, fmt.Sprintf("- [%s] %s: %s", task.Status, task.ID, task.Title))
 		}
-		lines = append(lines, fmt.Sprintf("- [%s] %s: %s", task.Status, task.ID, task.Title))
+	}
+	if dag, derr := s.LoadDAG(); derr == nil && dag != nil && (len(dag.Nodes) > 0 || len(dag.Edges) > 0) {
+		if ord, oerr := dag.TopologicalOrder(); oerr == nil && len(ord) > 0 {
+			lines = append(lines, fmt.Sprintf("Workflow order: %s", strings.Join(ord, " → ")))
+		} else if oerr != nil {
+			lines = append(lines, fmt.Sprintf("Workflow: invalid DAG (%v)", oerr))
+		}
+	}
+	if len(lines) == 0 {
+		return "No durable tasks recorded."
 	}
 	return strings.Join(lines, "\n")
 }
@@ -275,6 +283,44 @@ func (s *Store) List() ([]Task, error) {
 		return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
 	})
 	return tasks, nil
+}
+
+func (s *Store) workflowPath() string {
+	return filepath.Join(s.root, "workflow.json")
+}
+
+// SaveDAG persists a workflow DAG next to task JSON files.
+func (s *Store) SaveDAG(d *DAG) error {
+	if s.root == "" || d == nil {
+		return nil
+	}
+	if err := s.EnsureStructure(); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(d, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.workflowPath(), b, 0644)
+}
+
+// LoadDAG reads workflow.json, or returns an empty DAG if missing.
+func (s *Store) LoadDAG() (*DAG, error) {
+	if s.root == "" {
+		return &DAG{}, nil
+	}
+	b, err := os.ReadFile(s.workflowPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &DAG{}, nil
+		}
+		return nil, err
+	}
+	var d DAG
+	if err := json.Unmarshal(b, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
 }
 
 func (s *Store) loadIndex() (map[string]Task, error) {
