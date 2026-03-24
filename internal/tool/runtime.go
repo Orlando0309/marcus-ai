@@ -16,6 +16,7 @@ import (
 	"github.com/marcus-ai/marcus/internal/config"
 	"github.com/marcus-ai/marcus/internal/folder"
 	"github.com/marcus-ai/marcus/internal/lsp"
+	"github.com/marcus-ai/marcus/internal/safety"
 )
 
 type Definition struct {
@@ -39,10 +40,33 @@ type BuildOptions struct {
 func BuildRunner(opts BuildOptions) (*ToolRunner, error) {
 	runner := NewToolRunner()
 	runner.baseDir = opts.BaseDir
-	runner.Register(NewListFilesTool(opts.BaseDir))
+	if opts.Config != nil {
+		rc := opts.Config.Tools.RunCommand
+		runner.commandPolicy = safety.RunCommandPolicy{
+			BlockedSubstrings: rc.BlockedSubstrings,
+			AllowedPrefixes:   rc.AllowPrefixes,
+			AlwaysAllow:       rc.AlwaysAllow,
+			StrictAllowlist:   rc.StrictAllowlist,
+		}
+		if len(runner.commandPolicy.BlockedSubstrings) == 0 {
+			runner.commandPolicy.BlockedSubstrings = safety.DefaultRunCommandPolicy().BlockedSubstrings
+		}
+	}
+	listTool := NewListFilesTool(opts.BaseDir)
+	runner.Register(listTool)
 	runner.Register(NewReadFileTool(opts.BaseDir))
 	runner.Register(NewWriteFileTool(opts.BaseDir))
+	runner.Register(NewPatchFileTool(opts.BaseDir, listTool))
+	runner.Register(NewEditFileTool(opts.BaseDir, listTool))
+	runner.Register(NewGlobFilesTool(opts.BaseDir))
+	runner.Register(NewListDirectoryTool(opts.BaseDir))
 	runner.Register(NewRunCommandTool(opts.BaseDir, 30*time.Second))
+	runner.Register(NewRunBackgroundTool(opts.BaseDir))
+	runner.Register(NewGitOperationsTool(opts.BaseDir))
+	runner.Register(NewCreateFileTool(opts.BaseDir, listTool))
+	runner.Register(NewDeleteFileTool(opts.BaseDir, listTool))
+	runner.Register(NewFetchURLTool())
+	runner.Register(NewTestRunnerTool(opts.BaseDir))
 	runner.Register(NewSearchCodeToolWithIndex(opts.BaseDir, opts.CodeIndex))
 	runner.Register(NewFindSymbolToolWithIndex(opts.BaseDir, opts.CodeIndex))
 	if opts.CodeIndex != nil {
@@ -119,6 +143,10 @@ func BuildRunner(opts BuildOptions) (*ToolRunner, error) {
 			Source: "native",
 			Safe:   true,
 		})
+		runner.Register(NewLSPDefinitionTool(opts.BaseDir, opts.LSP))
+		runner.Register(NewLSPReferencesTool(opts.BaseDir, opts.LSP))
+		runner.Register(NewLSPHoverTool(opts.BaseDir, opts.LSP))
+		runner.Register(NewLSPRenameTool(opts.BaseDir, opts.LSP))
 	}
 	if opts.Folders != nil {
 		for _, def := range opts.Folders.ToolDefs() {
@@ -222,7 +250,7 @@ func defaultDefinition(tool Tool) Definition {
 		Source:      "native",
 	}
 	switch tool.Name() {
-	case "list_files", "read_file", "search_code", "find_symbol", "list_symbols", "find_references", "find_callers", "find_implementations", "get_diagnostics":
+	case "list_files", "list_directory", "glob_files", "read_file", "search_code", "find_symbol", "list_symbols", "find_references", "find_callers", "find_implementations", "get_diagnostics", "git_operations", "fetch_url", "lsp_definition", "lsp_references", "lsp_hover":
 		def.Safe = true
 	}
 	return def

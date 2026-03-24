@@ -18,14 +18,16 @@ import (
 
 	"github.com/marcus-ai/marcus/internal/codeintel"
 	"github.com/marcus-ai/marcus/internal/diff"
+	"github.com/marcus-ai/marcus/internal/safety"
 )
 
 // ToolRunner executes tools
 type ToolRunner struct {
-	baseDir     string
-	tools       map[string]Tool
-	definitions map[string]Definition
-	allowed     map[string]struct{}
+	baseDir       string
+	commandPolicy safety.RunCommandPolicy
+	tools         map[string]Tool
+	definitions   map[string]Definition
+	allowed       map[string]struct{}
 }
 
 // NewToolRunner creates a new tool runner
@@ -77,6 +79,10 @@ type ActionProposal struct {
 	Regex      bool           `json:"regex,omitempty"`
 	MaxResults int            `json:"max_results,omitempty"`
 	Reason     string         `json:"reason,omitempty"`
+	OldString   string         `json:"old_string,omitempty"`
+	NewString   string         `json:"new_string,omitempty"`
+	ReplaceAll  bool           `json:"replace_all,omitempty"`
+	UnifiedDiff string         `json:"unified_diff,omitempty"`
 }
 
 func (a ActionProposal) Label() string {
@@ -93,6 +99,14 @@ func (a ActionProposal) Label() string {
 		return fmt.Sprintf("read %s", a.Path)
 	case "find_symbol":
 		return fmt.Sprintf("find symbol %s", a.Symbol)
+	case "patch_file":
+		return fmt.Sprintf("patch %s", a.Path)
+	case "edit_file":
+		return fmt.Sprintf("edit %s", a.Path)
+	case "glob_files":
+		return fmt.Sprintf("glob %s", a.Pattern)
+	case "list_directory":
+		return fmt.Sprintf("list dir %s", valueOr(a.Path, "."))
 	default:
 		return "run " + a.Type
 	}
@@ -101,6 +115,39 @@ func (a ActionProposal) Label() string {
 func (a ActionProposal) Payload() json.RawMessage {
 	if len(a.Input) > 0 {
 		payload, _ := json.Marshal(a.Input)
+		return payload
+	}
+	switch a.Type {
+	case "patch_file":
+		ud := a.UnifiedDiff
+		if ud == "" {
+			ud = a.Content
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"path":         a.Path,
+			"unified_diff": ud,
+		})
+		return payload
+	case "edit_file":
+		payload, _ := json.Marshal(map[string]any{
+			"path":        a.Path,
+			"old_string":  a.OldString,
+			"new_string":  a.NewString,
+			"replace_all": a.ReplaceAll,
+		})
+		return payload
+	case "glob_files":
+		payload, _ := json.Marshal(map[string]any{
+			"path":        a.Path,
+			"pattern":     a.Pattern,
+			"max_results": a.MaxResults,
+		})
+		return payload
+	case "list_directory":
+		payload, _ := json.Marshal(map[string]any{
+			"path":        a.Path,
+			"max_results": a.MaxResults,
+		})
 		return payload
 	}
 	payload, _ := json.Marshal(map[string]any{
@@ -136,6 +183,9 @@ type ActionResult struct {
 
 // PreviewAction generates a preview for a proposal without mutating state.
 func (tr *ToolRunner) PreviewAction(proposal ActionProposal) (ActionPreview, error) {
+	if err := tr.validateActionProposal(proposal); err != nil {
+		return ActionPreview{}, err
+	}
 	switch proposal.Type {
 	case "write_file":
 		path, err := tr.resolvePath(proposal.Path)
@@ -199,6 +249,90 @@ func (tr *ToolRunner) PreviewAction(proposal ActionProposal) (ActionPreview, err
 		return ActionPreview{
 			Proposal: proposal,
 			Summary:  fmt.Sprintf("Find symbol %q in %s", proposal.Symbol, scope),
+		}, nil
+	case "patch_file":
+		path, err := tr.resolvePath(proposal.Path)
+		if err != nil {
+			return ActionPreview{}, err
+		}
+		current, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return ActionPreview{}, fmt.Errorf("read file: %w", readErr)
+		}
+		ud := proposal.UnifiedDiff
+		if ud == "" {
+			ud = proposal.Content
+		}
+		patches, err := diff.ParseUnifiedDiff(ud)
+		if err != nil {
+			return ActionPreview{}, err
+		}
+		next, err := diff.ApplyPatch(string(current), patches)
+		if err != nil {
+			return ActionPreview{}, err
+		}
+		d, err := diff.GenerateDiff(string(current), next)
+		if err != nil {
+			return ActionPreview{}, err
+		}
+		return ActionPreview{
+			Proposal: proposal,
+			Summary:  fmt.Sprintf("Patch %s (%d → %d bytes)", proposal.Path, len(current), len(next)),
+			Diff:     d,
+		}, nil
+	case "edit_file":
+		path, err := tr.resolvePath(proposal.Path)
+		if err != nil {
+			return ActionPreview{}, err
+		}
+		current, err := os.ReadFile(path)
+		if err != nil {
+			return ActionPreview{}, fmt.Errorf("read file: %w", err)
+		}
+		if proposal.OldString == "" {
+			return ActionPreview{}, fmt.Errorf("old_string is required")
+		}
+		s := string(current)
+		var next string
+		var n int
+		if proposal.ReplaceAll {
+			n = strings.Count(s, proposal.OldString)
+			if n == 0 {
+				return ActionPreview{}, fmt.Errorf("old_string not found")
+			}
+			next = strings.ReplaceAll(s, proposal.OldString, proposal.NewString)
+		} else {
+			n = strings.Count(s, proposal.OldString)
+			if n == 0 {
+				return ActionPreview{}, fmt.Errorf("old_string not found")
+			}
+			if n != 1 {
+				return ActionPreview{}, fmt.Errorf("old_string matches %d times; use replace_all or narrow the string", n)
+			}
+			next = strings.Replace(s, proposal.OldString, proposal.NewString, 1)
+		}
+		d, err := diff.GenerateDiff(s, next)
+		if err != nil {
+			return ActionPreview{}, err
+		}
+		return ActionPreview{
+			Proposal: proposal,
+			Summary:  fmt.Sprintf("Edit %s (%d replacement(s))", proposal.Path, n),
+			Diff:     d,
+		}, nil
+	case "glob_files":
+		scope := proposal.Path
+		if scope == "" {
+			scope = "."
+		}
+		return ActionPreview{
+			Proposal: proposal,
+			Summary:  fmt.Sprintf("Glob %q under %s", proposal.Pattern, scope),
+		}, nil
+	case "list_directory":
+		return ActionPreview{
+			Proposal: proposal,
+			Summary:  fmt.Sprintf("List directory %s", valueOr(proposal.Path, ".")),
 		}, nil
 	default:
 		if def, ok := tr.Definition(proposal.Type); ok {
@@ -312,6 +446,54 @@ func (tr *ToolRunner) ApplyAction(ctx context.Context, proposal ActionProposal) 
 			Proposal: proposal,
 			Summary:  preview.Summary,
 			Output:   formatFindSymbolOutput(out),
+			Success:  true,
+		}, nil
+	case "patch_file":
+		if _, err := tr.Run(ctx, "patch_file", proposal.Payload()); err != nil {
+			return ActionResult{}, err
+		}
+		if listTool, ok := tr.tools["list_files"].(*ListFilesTool); ok {
+			listTool.invalidate()
+		}
+		return ActionResult{
+			Proposal: proposal,
+			Summary:  preview.Summary,
+			Diff:     preview.Diff,
+			Success:  true,
+		}, nil
+	case "edit_file":
+		if _, err := tr.Run(ctx, "edit_file", proposal.Payload()); err != nil {
+			return ActionResult{}, err
+		}
+		if listTool, ok := tr.tools["list_files"].(*ListFilesTool); ok {
+			listTool.invalidate()
+		}
+		return ActionResult{
+			Proposal: proposal,
+			Summary:  preview.Summary,
+			Diff:     preview.Diff,
+			Success:  true,
+		}, nil
+	case "glob_files":
+		out, err := tr.Run(ctx, "glob_files", proposal.Payload())
+		if err != nil {
+			return ActionResult{}, err
+		}
+		return ActionResult{
+			Proposal: proposal,
+			Summary:  preview.Summary,
+			Output:   formatGlobFilesOutput(out),
+			Success:  true,
+		}, nil
+	case "list_directory":
+		out, err := tr.Run(ctx, "list_directory", proposal.Payload())
+		if err != nil {
+			return ActionResult{}, err
+		}
+		return ActionResult{
+			Proposal: proposal,
+			Summary:  preview.Summary,
+			Output:   formatListDirectoryOutput(out),
 			Success:  true,
 		}, nil
 	default:
@@ -1137,16 +1319,27 @@ func normalizeCommandForShell(command string) string {
 }
 
 func resolveToolPath(baseDir, path string) (string, error) {
+	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", nil
+	}
+	if strings.ContainsRune(path, 0) {
+		return "", fmt.Errorf("path contains NUL")
+	}
+	if len(path) > 4096 {
+		return "", fmt.Errorf("path too long")
 	}
 	if filepath.IsAbs(path) {
 		return ensureWithinBaseDir(baseDir, path)
 	}
+	rel := filepath.Clean(path)
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid relative path: %s", path)
+	}
 	if baseDir == "" {
 		return filepath.Abs(path)
 	}
-	return ensureWithinBaseDir(baseDir, filepath.Join(baseDir, path))
+	return ensureWithinBaseDir(baseDir, filepath.Join(baseDir, rel))
 }
 
 func ensureWithinBaseDir(baseDir, path string) (string, error) {
@@ -1161,7 +1354,15 @@ func ensureWithinBaseDir(baseDir, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rel, err := filepath.Rel(absBase, absPath)
+	evalPath := absPath
+	if rp, err := filepath.EvalSymlinks(absPath); err == nil {
+		evalPath = rp
+	}
+	evalBase := absBase
+	if rb, err := filepath.EvalSymlinks(absBase); err == nil {
+		evalBase = rb
+	}
+	rel, err := filepath.Rel(evalBase, evalPath)
 	if err != nil {
 		return "", err
 	}
@@ -1208,6 +1409,44 @@ func formatListFilesOutput(raw json.RawMessage) string {
 		return "No files found."
 	}
 	return strings.Join(payload.Files, "\n")
+}
+
+func formatGlobFilesOutput(raw json.RawMessage) string {
+	var payload struct {
+		Files []string `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return string(raw)
+	}
+	if len(payload.Files) == 0 {
+		return "No matches."
+	}
+	return strings.Join(payload.Files, "\n")
+}
+
+func formatListDirectoryOutput(raw json.RawMessage) string {
+	var payload struct {
+		Entries []struct {
+			Name  string `json:"name"`
+			Path  string `json:"path"`
+			IsDir bool   `json:"is_dir"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return string(raw)
+	}
+	if len(payload.Entries) == 0 {
+		return "Empty directory."
+	}
+	var lines []string
+	for _, e := range payload.Entries {
+		kind := "file"
+		if e.IsDir {
+			kind = "dir"
+		}
+		lines = append(lines, fmt.Sprintf("%s [%s] %s", e.Path, kind, e.Name))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func formatReadFileOutput(raw json.RawMessage) string {
