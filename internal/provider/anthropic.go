@@ -113,29 +113,13 @@ func (p *AnthropicProvider) CompleteRequest(ctx context.Context, req Request) (*
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/messages", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("new request: %w", err)
+	headers := map[string]string{
+		"x-api-key":         p.apiKey,
+		"anthropic-version": "2023-06-01",
 	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	httpResp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("anthropic API error %d: %s", httpResp.StatusCode, string(body))
-	}
-
 	var apiResp anthropicResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&apiResp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	if err := postJSON(ctx, p.httpClient, p.baseURL+"/messages", headers, body, &apiResp); err != nil {
+		return nil, err
 	}
 
 	var textParts []string

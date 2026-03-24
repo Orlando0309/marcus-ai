@@ -27,7 +27,7 @@ func NewOllamaProvider(model string) (*OllamaProvider, error) {
 	}
 
 	if model == "" {
-		model = "glm-5:cloud"
+		model = "qwen3.5:397b-cloud"
 	}
 
 	return &OllamaProvider{

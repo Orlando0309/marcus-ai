@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/marcus-ai/marcus/internal/metrics"
 )
 
 type Message struct {
@@ -70,14 +72,17 @@ func NewRuntime(provider Provider, projectRoot string, useCache bool) *Runtime {
 
 func (r *Runtime) Complete(ctx context.Context, req Request) (*Response, error) {
 	if cached, ok := r.loadCache(req); ok {
+		metrics.RecordProviderCacheHit()
 		cached.Cached = true
 		return cached, nil
 	}
 	if direct, ok := r.provider.(RequestAwareProvider); ok {
 		resp, err := direct.CompleteRequest(ctx, req)
 		if err != nil {
+			metrics.RecordProviderComplete(false)
 			return nil, err
 		}
+		metrics.RecordProviderComplete(true)
 		r.saveCache(req, resp)
 		return resp, nil
 	}
@@ -89,8 +94,10 @@ func (r *Runtime) Complete(ctx context.Context, req Request) (*Response, error) 
 		JSON:        req.JSON,
 	})
 	if err != nil {
+		metrics.RecordProviderComplete(false)
 		return nil, err
 	}
+	metrics.RecordProviderComplete(true)
 	result := &Response{
 		Text:         resp.Text,
 		Usage:        resp.Usage,
