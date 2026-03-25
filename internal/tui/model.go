@@ -33,6 +33,27 @@ type transcriptItem struct {
 	Meta  string
 }
 
+type PlanStep struct {
+	ID          string
+	Title       string
+	Status      string // "pending", "active", "complete", "error"
+	Duration    string
+	Tokens      int
+	SubSteps    []PlanStep
+	Expanded    bool
+}
+
+type Plan struct {
+	ID          string
+	Title       string
+	Status      string // "planning", "running", "complete", "error"
+	Duration    string
+	Tokens      int
+	Steps       []PlanStep
+	StartTime   time.Time
+	Expanded    bool
+}
+
 type pendingAction struct {
 	Proposal tool.ActionProposal
 	Preview  tool.ActionPreview
@@ -112,6 +133,10 @@ type Model struct {
 	sideDiffLive      string
 	sideDiffTitle     string
 	streamDiffSnippet string
+
+	// Plan display state
+	activePlan        *Plan
+	planDisplayIndex  int
 }
 
 type assistantEnvelope struct {
@@ -190,6 +215,7 @@ type agentContinuation struct {
 	userContent         string
 	startLoop           int
 	maxIterations       int
+	messages            []provider.Message
 	toolResults         []string
 	lastActionSignature string
 	stagnationCount     int
@@ -197,6 +223,15 @@ type agentContinuation struct {
 
 // New creates the Marcus single-pane TUI model.
 func New(cfg *config.Config) (*Model, error) {
+	// Ensure API key is available in environment for providers that need it
+	if config.ProviderNeedsAPIKey(cfg.Provider) {
+		apiKey, err := config.GetAPIKey(cfg.Provider)
+		if err == nil && apiKey != "" {
+			// Set environment variable for the provider to pick up
+			os.Setenv(config.ProviderAPIKeyEnvVar(cfg.Provider), apiKey)
+		}
+	}
+
 	prov, err := provider.Stack(cfg.Provider, cfg.Model, cfg.ProviderFallbacks)
 	if err != nil {
 		return nil, fmt.Errorf("provider: %w", err)
@@ -215,11 +250,12 @@ func New(cfg *config.Config) (*Model, error) {
 	_ = codeIndex.Build(context.Background())
 	lspBroker := lsp.NewBroker(cfg.LSP, baseDir)
 	toolRunner, err := tool.BuildRunner(tool.BuildOptions{
-		BaseDir:   baseDir,
-		Config:    cfg,
-		Folders:   flowEngine.FolderEngine(),
-		CodeIndex: codeIndex,
-		LSP:       lspBroker,
+		BaseDir:        baseDir,
+		Config:         cfg,
+		Folders:        flowEngine.FolderEngine(),
+		CodeIndex:      codeIndex,
+		LSP:            lspBroker,
+		SubagentRunner: flow.NewSubagentRunner(flowEngine.FolderEngine(), cfg, baseDir),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("tool runner: %w", err)
@@ -344,10 +380,19 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	return RunWithConfig(cfg, "")
+}
+
+// RunWithConfig starts the TUI application with a pre-configured config.
+func RunWithConfig(cfg *config.Config, resumeSession string) error {
 	model, err := New(cfg)
 	if err != nil {
 		return fmt.Errorf("create model: %w", err)
 	}
+
+	// TODO: Handle resumeSession if needed
+	_ = resumeSession
+
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("run program: %w", err)
