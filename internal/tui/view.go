@@ -20,12 +20,22 @@ func (m *Model) View() string {
 		diffCol := m.styles.DiffPane.Render(m.diffViewport.View())
 		main = lipgloss.JoinHorizontal(lipgloss.Top, main, diffCol)
 	}
+
+	// Build the bottom section with help and optional bottom bar
+	bottomSection := m.styles.Help.Render(m.renderHelp())
+	if len(m.pending) > 0 {
+		bottomBar := m.renderBottomBar()
+		if bottomBar != "" {
+			bottomSection = lipgloss.JoinVertical(lipgloss.Left, bottomBar, bottomSection)
+		}
+	}
+
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
 		m.styles.StatusBar.Render(m.renderStatusBar()),
 		main,
 		m.styles.Composer.Render(m.textarea.View()),
-		m.styles.Help.Render(m.renderHelp()),
+		bottomSection,
 	)
 	return content
 }
@@ -92,6 +102,126 @@ func (m *Model) renderHelp() string {
 		m.styles.HelpKey.Render("Space") + m.styles.HelpDesc.Render(" step"),
 	}
 	return strings.Join(help, "  ")
+}
+
+// renderBottomBar renders a bottom bar similar to Claude Code's "accept edits on"
+func (m *Model) renderBottomBar() string {
+	if len(m.pending) == 0 {
+		return ""
+	}
+
+	var parts []string
+	parts = append(parts, m.styles.BottomBarKey.Render("y")+m.styles.BottomBarDesc.Render(" accept edits"))
+	parts = append(parts, m.styles.BottomBarKey.Render("n")+m.styles.BottomBarDesc.Render(" discard"))
+	if len(m.pending) > 1 {
+		parts = append(parts, m.styles.BottomBarKey.Render("[/]")+m.styles.BottomBarDesc.Render(" cycle"))
+	}
+	parts = append(parts, m.styles.BottomBarKey.Render("shift+tab")+m.styles.BottomBarDesc.Render(" cycle"))
+	parts = append(parts, m.styles.BottomBarKey.Render("esc")+m.styles.BottomBarDesc.Render(" interrupt"))
+	parts = append(parts, m.styles.BottomBarKey.Render("ctrl+t")+m.styles.BottomBarDesc.Render(" hide tasks"))
+
+	return m.styles.BottomBar.Render(strings.Join(parts, "  ·  "))
+}
+
+// renderPlan renders an active plan with its steps in a hierarchical display
+func (m *Model) renderPlan(plan *Plan) string {
+	if plan == nil {
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Plan header with title and metadata
+	title := m.styles.PlanTitle.Render(plan.Title)
+	meta := ""
+	if plan.Duration != "" {
+		meta += "  " + m.styles.PlanMeta.Render("("+plan.Duration)
+		if plan.Tokens > 0 {
+			meta += "  ·  " + m.styles.PlanMeta.Render(fmt.Sprintf("↓ %s", formatTokens(plan.Tokens)))
+		}
+		if plan.Status == "running" || plan.Status == "planning" {
+			meta += "  ·  thinking)"
+		} else {
+			meta += ")"
+		}
+	}
+	b.WriteString(title + meta)
+	b.WriteString("\n")
+
+	// Render steps
+	for _, step := range plan.Steps {
+		b.WriteString(m.renderPlanStep(step, 0))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+// renderPlanStep renders a single plan step with checkbox and optional substeps
+func (m *Model) renderPlanStep(step PlanStep, depth int) string {
+	var b strings.Builder
+
+	indent := strings.Repeat("  ", depth)
+
+	// Checkbox based on status
+	checkbox := "☐ "
+	style := m.styles.PlanStepPending
+	checkStyle := m.styles.CheckboxPending
+
+	switch step.Status {
+	case "active", "running":
+		checkbox = "☐ "
+		style = m.styles.PlanStepActive
+		checkStyle = m.styles.CheckboxActive
+	case "complete", "done":
+		checkbox = "✓ "
+		style = m.styles.PlanStepComplete
+		checkStyle = m.styles.CheckboxComplete
+	case "error", "failed":
+		checkbox = "☒ "
+		style = m.styles.PlanStepError
+		checkStyle = m.styles.CheckboxError
+	}
+
+	// Build the line
+	line := indent + checkStyle.Render(checkbox) + style.Render(step.Title)
+
+	// Add metadata if present
+	meta := ""
+	if step.Duration != "" {
+		meta = "  " + m.styles.PlanMeta.Render(step.Duration)
+	}
+	if step.Tokens > 0 {
+		if meta != "" {
+			meta += "  "
+		} else {
+			meta = "  "
+		}
+		meta += m.styles.PlanMeta.Render(fmt.Sprintf("· %s", formatTokens(step.Tokens)))
+	}
+	if step.Status == "running" || step.Status == "active" {
+		meta += "  " + m.styles.PlanMeta.Render("· thinking")
+	}
+
+	b.WriteString(line + meta)
+
+	// Render substeps if expanded
+	if step.Expanded && len(step.SubSteps) > 0 {
+		for _, sub := range step.SubSteps {
+			b.WriteString("\n")
+			b.WriteString(m.renderPlanStep(sub, depth+1))
+		}
+	}
+
+	return b.String()
+}
+
+// formatTokens formats token count in a human-readable way (e.g., "31.3k")
+func formatTokens(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func renderHelpText() string {
@@ -166,23 +296,14 @@ func (m *Model) clampPendingDiffIndex() {
 
 func (m *Model) buildDiffPaneContent() string {
 	var b strings.Builder
-	writeColored := func(title, body string) {
-		b.WriteString(m.styles.DiffTitle.Render(title))
-		b.WriteString("\n\n")
-		b.WriteString(diff.RenderDiff(body))
-		b.WriteString("\n\n")
-	}
 
 	if len(m.pending) > 0 {
 		m.clampPendingDiffIndex()
 		idx := m.pendingDiffIndex
 		p := m.pending[idx]
-		title := fmt.Sprintf("Pending [%d/%d] — %s", idx+1, len(m.pending), strings.TrimSpace(p.Preview.Summary))
-		if title == "" {
-			title = fmt.Sprintf("Pending [%d/%d]", idx+1, len(m.pending))
-		}
 		raw := strings.TrimSpace(p.Preview.Diff)
 		if raw == "" {
+			title := fmt.Sprintf("Pending [%d/%d]", idx+1, len(m.pending))
 			b.WriteString(m.styles.DiffTitle.Render(title))
 			b.WriteString("\n\n")
 			b.WriteString("(No unified diff text for this action — ")
@@ -190,8 +311,7 @@ func (m *Model) buildDiffPaneContent() string {
 			b.WriteString(")\n")
 			return b.String()
 		}
-		writeColored(title, raw)
-		return strings.TrimRight(b.String(), "\n")
+		return m.renderStyledDiff(p.Preview.Summary, raw, idx+1, len(m.pending))
 	}
 
 	if strings.TrimSpace(m.sideDiffLive) != "" {
@@ -199,19 +319,109 @@ func (m *Model) buildDiffPaneContent() string {
 		if title == "" {
 			title = "Live preview"
 		}
-		writeColored(title, strings.TrimSpace(m.sideDiffLive))
-		return strings.TrimRight(b.String(), "\n")
+		return m.renderStyledDiff(title, strings.TrimSpace(m.sideDiffLive), 0, 0)
 	}
 
 	if m.streaming && strings.TrimSpace(m.streamDiffSnippet) != "" {
-		writeColored("Streaming (partial diff)", strings.TrimSpace(m.streamDiffSnippet))
-		return strings.TrimRight(b.String(), "\n")
+		return m.renderStyledDiff("Streaming (partial diff)", strings.TrimSpace(m.streamDiffSnippet), 0, 0)
 	}
 
 	b.WriteString(m.styles.DiffTitle.Render("Diff viewer"))
 	b.WriteString("\n\n")
 	b.WriteString("(No preview yet. During agent runs, proposed diffs appear here before approval. With streaming, partial @@ hunks show when detected.)\n")
 	return b.String()
+}
+
+func (m *Model) renderStyledDiff(summary, diffText string, current, total int) string {
+	var b strings.Builder
+
+	// Parse statistics and render header
+	stats := diff.ParseDiffStats(diffText)
+	var title string
+	if total > 0 {
+		title = fmt.Sprintf("Pending [%d/%d] — ", current, total)
+	}
+	if stats.FilePath != "" {
+		title += stats.FilePath
+	} else if summary != "" {
+		title += summary
+	}
+
+	b.WriteString(m.styles.DiffHeader.Render(title))
+	b.WriteString("\n")
+
+	if stats.Added > 0 || stats.Removed > 0 {
+		statsText := fmt.Sprintf("Added %d line", stats.Added)
+		if stats.Added != 1 {
+			statsText += "s"
+		}
+		statsText += fmt.Sprintf(", removed %d line", stats.Removed)
+		if stats.Removed != 1 {
+			statsText += "s"
+		}
+		b.WriteString(m.styles.DiffTitle.Render(statsText))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+
+	// Parse and render the diff with line numbers
+	lines, _ := diff.StyledDiff(diffText)
+
+	for _, line := range lines {
+		switch line.Type {
+		case "@":
+			// Hunk header
+			b.WriteString(m.styles.DiffHunkHeader.Render(line.Content))
+			b.WriteString("\n")
+
+		case "+":
+			// Added line
+			lineNum := ""
+			if line.NewLineNum > 0 {
+				lineNum = m.styles.DiffAddedLineNum.Render(fmt.Sprintf("%d", line.NewLineNum))
+			}
+			content := m.styles.DiffAdded.Render(" + " + line.Content)
+			b.WriteString(lineNum + content)
+			b.WriteString("\n")
+
+		case "-":
+			// Removed line
+			lineNum := ""
+			if line.OldLineNum > 0 {
+				lineNum = m.styles.DiffRemovedLineNum.Render(fmt.Sprintf("%d", line.OldLineNum))
+			}
+			content := m.styles.DiffRemoved.Render(" - " + line.Content)
+			b.WriteString(lineNum + content)
+			b.WriteString("\n")
+
+		case " ":
+			// Context line
+			oldNum := ""
+			newNum := ""
+			if line.OldLineNum > 0 {
+				oldNum = m.styles.DiffLineNumCtx.Render(fmt.Sprintf("%d", line.OldLineNum))
+			}
+			if line.NewLineNum > 0 {
+				newNum = m.styles.DiffLineNumCtx.Render(fmt.Sprintf("%d", line.NewLineNum))
+			}
+			// For context lines, show old line number on left, new on right (but we only have space for one)
+			// Show old line number since it's the reference
+			if oldNum != "" {
+				b.WriteString(oldNum)
+			} else if newNum != "" {
+				b.WriteString(newNum)
+			}
+			b.WriteString(m.styles.DiffContext.Render("   " + line.Content))
+			b.WriteString("\n")
+
+		case "h":
+			// File header (---/+++ lines) - skip or show minimally
+			// We'll skip these as we already show the file path in the header
+		}
+	}
+
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m *Model) refreshDiffPane() {
@@ -408,4 +618,120 @@ func (m *Model) refreshTaskBoard() {
 	}
 	m.taskBoardIndex = len(m.transcript)
 	m.addItem("system", "Tasks", strings.Join(lines, "\n"), "")
+}
+
+// CreatePlan creates a new plan and displays it in the transcript
+func (m *Model) CreatePlan(title string) *Plan {
+	plan := &Plan{
+		ID:        fmt.Sprintf("plan-%d", time.Now().Unix()),
+		Title:     title,
+		Status:    "planning",
+		StartTime: time.Now(),
+		Expanded:  true,
+		Steps:     []PlanStep{},
+	}
+	m.activePlan = plan
+	m.planDisplayIndex = len(m.transcript)
+	m.addItem("plan", title, m.renderPlan(plan), "")
+	return plan
+}
+
+// UpdatePlan updates the active plan display
+func (m *Model) UpdatePlan() {
+	if m.activePlan == nil {
+		return
+	}
+	// Update duration
+	if m.activePlan.StartTime.IsZero() {
+		m.activePlan.Duration = ""
+	} else {
+		elapsed := time.Since(m.activePlan.StartTime)
+		m.activePlan.Duration = formatDuration(elapsed)
+	}
+
+	if m.planDisplayIndex >= 0 && m.planDisplayIndex < len(m.transcript) {
+		m.transcript[m.planDisplayIndex].Body = m.renderPlan(m.activePlan)
+		m.renderTranscript()
+	}
+}
+
+// CompletePlan marks the active plan as complete
+func (m *Model) CompletePlan() {
+	if m.activePlan == nil {
+		return
+	}
+	m.activePlan.Status = "complete"
+	m.UpdatePlan()
+	m.activePlan = nil
+	m.planDisplayIndex = -1
+}
+
+// AddPlanStep adds a step to the active plan
+func (m *Model) AddPlanStep(title, status string) *PlanStep {
+	if m.activePlan == nil {
+		m.CreatePlan("Working...")
+	}
+	step := PlanStep{
+		ID:     fmt.Sprintf("step-%d", len(m.activePlan.Steps)),
+		Title:  title,
+		Status: status,
+	}
+	m.activePlan.Steps = append(m.activePlan.Steps, step)
+	m.UpdatePlan()
+	return &m.activePlan.Steps[len(m.activePlan.Steps)-1]
+}
+
+// UpdatePlanStep updates the status of a plan step
+func (m *Model) UpdatePlanStep(stepID, status string) {
+	if m.activePlan == nil {
+		return
+	}
+	for i := range m.activePlan.Steps {
+		if m.activePlan.Steps[i].ID == stepID {
+			m.activePlan.Steps[i].Status = status
+			m.UpdatePlan()
+			return
+		}
+	}
+}
+
+// SetPlanTokens updates the token count for the active plan
+func (m *Model) SetPlanTokens(tokens int) {
+	if m.activePlan == nil {
+		return
+	}
+	m.activePlan.Tokens = tokens
+	m.UpdatePlan()
+}
+
+// SetPlanStepTokens updates the token count for a specific step
+func (m *Model) SetPlanStepTokens(stepID string, tokens int) {
+	if m.activePlan == nil {
+		return
+	}
+	for i := range m.activePlan.Steps {
+		if m.activePlan.Steps[i].ID == stepID {
+			m.activePlan.Steps[i].Tokens = tokens
+			m.UpdatePlan()
+			return
+		}
+	}
+}
+
+// formatDuration formats a duration in a human-readable way (e.g., "8m 54s")
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		mins := int(d.Minutes())
+		secs := int(d.Seconds()) % 60
+		if secs > 0 {
+			return fmt.Sprintf("%dm %ds", mins, secs)
+		}
+		return fmt.Sprintf("%dm", mins)
+	}
+	hours := int(d.Hours())
+	mins := int(d.Minutes()) % 60
+	return fmt.Sprintf("%dh %dm", hours, mins)
 }

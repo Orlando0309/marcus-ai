@@ -10,6 +10,7 @@ import (
 	ctxpkg "github.com/marcus-ai/marcus/internal/context"
 	"github.com/marcus-ai/marcus/internal/folder"
 	"github.com/marcus-ai/marcus/internal/provider"
+	"github.com/marcus-ai/marcus/internal/task"
 	"github.com/marcus-ai/marcus/internal/tool"
 )
 
@@ -42,6 +43,11 @@ func (m *Model) sendToAI(content string) tea.Cmd {
 	m.streamBuffer.Reset()
 	m.streaming = true
 	m.activityIndex = len(m.transcript)
+
+	// Create a plan for this request - derive title from content
+	planTitle := derivePlanTitle(content)
+	m.CreatePlan(planTitle)
+
 	m.addItem("system", "Marcus Working", "Assembling repo context and preparing the request...", "working")
 
 	agent := m.selectAgent(content)
@@ -97,6 +103,32 @@ func waitForStream(stream <-chan provider.StreamChunk, context ctxpkg.Snapshot) 
 	}
 }
 
+// derivePlanTitle creates a plan title based on user input
+func derivePlanTitle(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "Working..."
+	}
+
+	// Check for common patterns
+	lower := strings.ToLower(content)
+	if strings.HasPrefix(lower, "implement") || strings.HasPrefix(lower, "add") ||
+		strings.HasPrefix(lower, "create") || strings.HasPrefix(lower, "build") {
+		// Return the first sentence or up to 60 chars
+		if len(content) > 60 {
+			return content[:60] + "..."
+		}
+		return content
+	}
+
+	// For questions or shorter requests
+	if strings.HasSuffix(content, "?") {
+		return "Answering: " + content
+	}
+
+	return "Implementing " + content + "..."
+}
+
 func startAgentLoopCmd(m *Model, content string, snapshot ctxpkg.Snapshot, agent *folder.AgentDef) tea.Cmd {
 	return func() tea.Msg {
 		ch := make(chan tea.Msg, 32)
@@ -143,8 +175,8 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 		m.clearAgentContinuation()
 	}
 
-	toolResults := []string{}
 	currentSnapshot := snapshot
+	var messages []provider.Message
 	var lastRaw string
 	lastActionSignature := ""
 	stagnationCount := 0
@@ -159,16 +191,20 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 
 	if resume != nil {
 		content = resume.userContent
-		toolResults = append([]string(nil), resume.toolResults...)
+		messages = append([]provider.Message(nil), resume.messages...)
 		startLoop = resume.startLoop
 		maxIterations = resume.maxIterations
 		lastActionSignature = resume.lastActionSignature
 		stagnationCount = resume.stagnationCount
 		currentSnapshot = m.contextAssembler.Assemble(content, m.session)
+		if len(resume.toolResults) > 0 {
+			messages = append(messages, buildLoopFollowupMessage(currentSnapshot, content, resume.toolResults))
+		}
+	} else {
+		messages = buildInitialMessagesForAgent(m.toolRunner, currentSnapshot, m.session, content, agent)
 	}
 
 	goalContent := content
-	requestContent := goalContent
 
 	consecutivePlanOnlyResponses := 0
 
@@ -183,9 +219,19 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 		return cookingPhases[len(cookingPhases)-1]
 	}
 
+	// Track plan steps
+	planSteps := make(map[int]string) // loop iteration -> step ID
+
 	for loop := startLoop; loop <= maxIterations; loop++ {
 		iterStart := time.Now()
 		phase := cookPhase(loop)
+
+		// Add step for this iteration
+		stepID := m.AddPlanStep(fmt.Sprintf("Implement %s", phase), "pending")
+		if stepID != nil {
+			planSteps[loop] = stepID.ID
+		}
+
 		m.addItem("iteration", phase, "Planning, execution, and verification", "")
 
 		if m.stepMode {
@@ -207,17 +253,22 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 			phase: phase,
 		}
 
-		prompt := buildPromptForAgent(m.toolRunner, currentSnapshot, m.session, requestContent, toolResults, agent)
+		// Mark step as active
+		if stepID, ok := planSteps[loop]; ok {
+			m.UpdatePlanStep(stepID, "active")
+		}
+
 		request := provider.Request{
 			Model:       m.cfg.Model,
 			Temperature: m.cfg.Temperature,
 			MaxTokens:   m.cfg.MaxTokens,
 			JSON:        true,
-			Messages: []provider.Message{
-				{Role: "system", Content: buildAgentSystemPrompt(agent)},
-				{Role: "user", Content: prompt},
+			Messages:    messages,
+			Tools:       providerToolSpecs(m.toolRunner),
+			Reasoning: provider.ReasoningOptions{
+				Effort:       m.cfg.Reasoning.Effort,
+				BudgetTokens: m.cfg.Reasoning.BudgetTokens,
 			},
-			Tools: providerToolSpecs(m.toolRunner),
 		}
 		ctx := context.Background()
 		stream, err := m.providerRuntime.Stream(ctx, request)
@@ -278,15 +329,48 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 
 		lastRaw = streamBuffer.String()
 		envelope := parseAssistantEnvelope(lastRaw)
+		messages = append(messages, provider.Message{Role: "assistant", Content: lastRaw})
+		m.session.SetProviderMessages(messages, m.cfg.Session.MaxTurns*2)
+		taskStatus := currentTaskStatus(envelope.Tasks)
+		envelope.Actions = filterCompletionNoopActions(envelope.Actions, taskStatus)
 
 		modelMessage := visibleAssistantMessage(envelope, lastRaw)
 		m.addItem("assistant", "Marcus", modelMessage, "")
+		m.session.AppendEvent("assistant_response", "assistant", "marcus", modelMessage, lastRaw, "", nil)
 
 		elapsed := time.Since(iterStart).Round(time.Second)
 		ch <- agentStatusMsg{
 			body:  fmt.Sprintf("%s — done in %v: %d action(s) parsed", phase, elapsed, len(envelope.Actions)),
 			meta:  "analyzing",
 			phase: phase,
+		}
+
+		// Mark step as complete and update tokens
+		if stepID, ok := planSteps[loop]; ok {
+			m.UpdatePlanStep(stepID, "complete")
+		}
+		m.SetPlanTokens(charCount)
+
+		if taskStatus == task.StatusDone || taskStatus == task.StatusBlocked {
+			m.clearAgentContinuation()
+			finalMessage := modelMessage
+			if strings.TrimSpace(finalMessage) == "" {
+				if taskStatus == task.StatusDone {
+					finalMessage = "Task completed."
+				} else {
+					finalMessage = "Task blocked."
+				}
+			}
+			ch <- assistantResponseMsg{
+				envelope: assistantEnvelope{
+					Message: finalMessage,
+					Tasks:   envelope.Tasks,
+				},
+				raw:      lastRaw,
+				context:  currentSnapshot,
+				showItem: false,
+			}
+			return
 		}
 
 		if len(envelope.Actions) == 0 {
@@ -300,8 +384,11 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 				if strings.TrimSpace(modelMessage) != "" {
 					m.session.AppendTurn("assistant", modelMessage, maxTurns)
 				}
-				toolResults = append(toolResults, planOnlyNoActionsNudge(consecutivePlanOnlyResponses, maxPlanOnlyRetries))
-				requestContent = planOnlyRetryPrompt(goalContent, modelMessage, consecutivePlanOnlyResponses, maxPlanOnlyRetries)
+				messages = append(messages, provider.Message{
+					Role:    "user",
+					Content: planOnlyRetryPrompt(goalContent, modelMessage, consecutivePlanOnlyResponses, maxPlanOnlyRetries),
+				})
+				m.session.SetProviderMessages(messages, m.cfg.Session.MaxTurns*2)
 				m.addItem("system", "No Tool Actions", fmt.Sprintf("Response had no actions in JSON — nudging for concrete tool proposals (%d/%d).", consecutivePlanOnlyResponses, maxPlanOnlyRetries), "retry")
 				ch <- agentStatusMsg{
 					body:  fmt.Sprintf("%s: empty actions[] — retrying for concrete tool calls", phase),
@@ -323,7 +410,6 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 			return
 		}
 		consecutivePlanOnlyResponses = 0
-		requestContent = goalContent
 
 		actionSignature := actionPlanSignature(envelope.Actions)
 		if actionSignature != "" && actionSignature == lastActionSignature {
@@ -335,8 +421,11 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 		maxStagnationRetries := 4
 		if stagnationCount >= 2 {
 			if stagnationCount < maxStagnationRetries && loop < maxIterations {
-				toolResults = append(toolResults, stagnationNoProgressNudge(stagnationCount, maxStagnationRetries))
-				requestContent = stagnationRetryPrompt(goalContent, modelMessage, stagnationCount, maxStagnationRetries)
+				messages = append(messages, provider.Message{
+					Role:    "user",
+					Content: stagnationRetryPrompt(goalContent, modelMessage, stagnationCount, maxStagnationRetries),
+				})
+				m.session.SetProviderMessages(messages, m.cfg.Session.MaxTurns*2)
 				m.addItem("system", "Loop Guard", fmt.Sprintf("Marcus detected a repeated action plan and is nudging for a different next step (%d/%d before stop).", stagnationCount, maxStagnationRetries), "retry")
 				ch <- agentStatusMsg{
 					body:  fmt.Sprintf("%s: repeated action plan — asking for a different concrete step", phase),
@@ -410,6 +499,7 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 		mutating := len(tool.MutatingPaths(safeActions)) > 0
 
 		wroteFiles := false
+		iterationToolResults := []string{}
 		for _, action := range safeActions {
 			m.addItem("action", "Running: "+action.Label(), valueOr(action.Reason, "safe auto-run"), "auto-run")
 			ch <- agentStatusMsg{
@@ -423,8 +513,9 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 					_ = tool.RestoreUndoBatch(txBatch)
 				}
 				errStr := fmt.Sprintf("Error running tool: %s", err.Error())
-				toolResults = append(toolResults, fmt.Sprintf("Tool: %s\n%s", action.Label(), errStr))
+				iterationToolResults = append(iterationToolResults, fmt.Sprintf("Tool: %s\n%s", action.Label(), errStr))
 				m.addItem("tool_result", "Error: "+action.Label(), errStr, "failed")
+				m.session.AppendEvent("tool_result", "tool", action.Type, errStr, "", "failed", map[string]string{"label": action.Label()})
 				ch <- agentStatusMsg{
 					body:  fmt.Sprintf("Failed: %s", action.Label()),
 					meta:  "tool-error",
@@ -433,8 +524,9 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 				wroteFiles = false
 				break
 			}
-			toolResults = append(toolResults, fmt.Sprintf("Tool: %s\n%s", action.Label(), result.Output))
+			iterationToolResults = append(iterationToolResults, fmt.Sprintf("Tool: %s\n%s", action.Label(), result.Output))
 			m.addItem("tool_result", "Result: "+action.Label(), trimText(result.Output, 1500), "auto")
+			m.session.AppendEvent("tool_result", "tool", action.Type, trimText(result.Output, 1500), "", "ok", map[string]string{"label": action.Label()})
 			ch <- agentStatusMsg{
 				body:  fmt.Sprintf("Completed: %s", action.Label()),
 				meta:  "tool-done",
@@ -464,7 +556,7 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 					Reason:  "verification after file changes",
 				})
 				if verifyErr == nil {
-					toolResults = append(toolResults, fmt.Sprintf("Verification: %s\n%s", verifyCmd, verifyResult.Output))
+					iterationToolResults = append(iterationToolResults, fmt.Sprintf("Verification: %s\n%s", verifyCmd, verifyResult.Output))
 					successMeta := "passed"
 					if !verifyResult.Success {
 						successMeta = "FAILED"
@@ -490,7 +582,7 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 								Reason:  "automatic dependency install after verification failure",
 							})
 							if installErr == nil {
-								toolResults = append(toolResults, fmt.Sprintf("Dependency install: %s\n%s", installCmd, installResult.Output))
+								iterationToolResults = append(iterationToolResults, fmt.Sprintf("Dependency install: %s\n%s", installCmd, installResult.Output))
 								meta := "FAILED"
 								if installResult.Success {
 									meta = "passed"
@@ -503,7 +595,7 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 										Reason:  "re-verify after dependency install",
 									})
 									if reverifyErr == nil {
-										toolResults = append(toolResults, fmt.Sprintf("Re-verify: %s\n%s", verifyCmd, reverifyResult.Output))
+										iterationToolResults = append(iterationToolResults, fmt.Sprintf("Re-verify: %s\n%s", verifyCmd, reverifyResult.Output))
 										reMeta := "FAILED"
 										if reverifyResult.Success {
 											reMeta = "passed"
@@ -524,7 +616,7 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 							phase: phase,
 						}
 
-						toolResults = append(toolResults, failMsg)
+						iterationToolResults = append(iterationToolResults, failMsg)
 					} else {
 						m.addVerificationSummary(verifyCmd, verifyResult.ExitCode, true, "Checks passed")
 						m.addItem("system", "Build Passed", "All checks passed.", "complete")
@@ -539,7 +631,7 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 				_, err := m.toolRunner.PreviewAction(action)
 				if err != nil {
 					errStr := fmt.Sprintf("Action Validation Error: %s", err.Error())
-					toolResults = append(toolResults, fmt.Sprintf("Tool %s failed: %s", action.Label(), errStr))
+					iterationToolResults = append(iterationToolResults, fmt.Sprintf("Tool %s failed: %s", action.Label(), errStr))
 					m.addItem("tool_result", "Validation Error: "+action.Label(), errStr, "failed")
 					previewErrors = append(previewErrors, errStr)
 				}
@@ -556,7 +648,7 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 			}
 
 			m.addItem("system", "Approval Required", fmt.Sprintf("%d action(s) need your approval — press y to apply, n to discard", len(pendingActions)), "")
-			m.stashAgentContinuationForPending(goalContent, loop, maxIterations, toolResults, lastActionSignature, stagnationCount)
+			m.stashAgentContinuationForPending(goalContent, loop, maxIterations, messages, iterationToolResults, lastActionSignature, stagnationCount)
 			ch <- assistantResponseMsg{
 				envelope: assistantEnvelope{Message: "Actions proposed — some need approval.", Actions: pendingActions},
 				raw:      lastRaw,
@@ -567,6 +659,10 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 		}
 
 		currentSnapshot = m.contextAssembler.Assemble(goalContent, m.session)
+		if len(iterationToolResults) > 0 {
+			messages = append(messages, buildLoopFollowupMessage(currentSnapshot, goalContent, iterationToolResults))
+			m.session.SetProviderMessages(messages, m.cfg.Session.MaxTurns*2)
+		}
 	}
 
 	m.clearAgentContinuation()
@@ -583,6 +679,7 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 func (m *Model) stashAgentContinuationForPending(
 	content string,
 	loop, maxIterations int,
+	messages []provider.Message,
 	toolResults []string,
 	lastSig string,
 	stag int,
@@ -597,6 +694,7 @@ func (m *Model) stashAgentContinuationForPending(
 		userContent:         content,
 		startLoop:           next,
 		maxIterations:       maxIt,
+		messages:            append([]provider.Message(nil), messages...),
 		toolResults:         append([]string(nil), toolResults...),
 		lastActionSignature: lastSig,
 		stagnationCount:     stag,
