@@ -30,17 +30,19 @@ type Definition struct {
 }
 
 type BuildOptions struct {
-	BaseDir   string
-	Config    *config.Config
-	Folders   *folder.FolderEngine
-	CodeIndex *codeintel.Index
-	LSP       *lsp.Broker
+	BaseDir        string
+	Config         *config.Config
+	Folders        *folder.FolderEngine
+	CodeIndex      *codeintel.Index
+	LSP            *lsp.Broker
+	SubagentRunner SubagentRunner
 }
 
 func BuildRunner(opts BuildOptions) (*ToolRunner, error) {
 	runner := NewToolRunner()
 	runner.baseDir = opts.BaseDir
 	if opts.Config != nil {
+		runner.hooks = opts.Config.Hooks
 		rc := opts.Config.Tools.RunCommand
 		runner.commandPolicy = safety.RunCommandPolicy{
 			BlockedSubstrings: rc.BlockedSubstrings,
@@ -67,8 +69,12 @@ func BuildRunner(opts BuildOptions) (*ToolRunner, error) {
 	runner.Register(NewDeleteFileTool(opts.BaseDir, listTool))
 	runner.Register(NewFetchURLTool())
 	runner.Register(NewTestRunnerTool(opts.BaseDir))
+	runner.Register(NewTodoWriteTool(opts.BaseDir))
 	runner.Register(NewSearchCodeToolWithIndex(opts.BaseDir, opts.CodeIndex))
 	runner.Register(NewFindSymbolToolWithIndex(opts.BaseDir, opts.CodeIndex))
+	if opts.SubagentRunner != nil {
+		runner.Register(NewTaskTool(opts.SubagentRunner))
+	}
 	if opts.CodeIndex != nil {
 		runner.RegisterWithDefinition(NewListSymbolsTool(opts.CodeIndex), Definition{
 			Name:        "list_symbols",
@@ -157,6 +163,16 @@ func BuildRunner(opts BuildOptions) (*ToolRunner, error) {
 			runner.RegisterWithDefinition(manifest, manifest.definition(opts.Config))
 		}
 	}
+
+	// Register composite tools from predefined pipelines
+	compositeRegistry := NewCompositeToolRegistry()
+	compositeRegistry.LoadPredefined()
+	for _, name := range compositeRegistry.List() {
+		if tool, ok := compositeRegistry.Get(name); ok {
+			runner.Register(tool)
+		}
+	}
+
 	return runner, nil
 }
 
@@ -218,10 +234,12 @@ func (tr *ToolRunner) Scoped(allowed []string) *ToolRunner {
 		allowedSet[name] = struct{}{}
 	}
 	return &ToolRunner{
-		baseDir:     tr.baseDir,
-		tools:       tr.tools,
-		definitions: tr.definitions,
-		allowed:     allowedSet,
+		baseDir:       tr.baseDir,
+		commandPolicy: tr.commandPolicy,
+		tools:         tr.tools,
+		definitions:   tr.definitions,
+		allowed:       allowedSet,
+		hooks:         tr.hooks,
 	}
 }
 

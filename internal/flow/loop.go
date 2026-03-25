@@ -18,13 +18,13 @@ import (
 
 // ContextBudget tracks estimated token usage across the loop run.
 type ContextBudget struct {
-	MaxTokens     int
+	MaxTokens    int
 	WarnAtPct    int
 	CompactAtPct int
 	// Running estimate (in tokens, 1 token ≈ 4 chars)
 	EstimatedUsed int
-	Warned       bool
-	Compacted    int // number of times we've compacted
+	Warned        bool
+	Compacted     int // number of times we've compacted
 }
 
 // Percent returns the estimated context usage as a percentage (0-100+).
@@ -57,14 +57,14 @@ func EstimateTokens(s string) int {
 
 // Snapshot is the assembled prompt context (mirrors ctxpkg.Snapshot).
 type Snapshot struct {
-	Text              string
-	Branch            string
-	Dirty             bool
-	FileHints         []string
-	TODOHints         []task.TODOHint
-	EstimatedTokens   int
-	Truncated         bool
-	DroppedSections   []string
+	Text            string
+	Branch          string
+	Dirty           bool
+	FileHints       []string
+	TODOHints       []task.TODOHint
+	EstimatedTokens int
+	Truncated       bool
+	DroppedSections []string
 }
 
 // ContextAssembler is the subset of ctxpkg.Assembler that LoopEngine needs.
@@ -86,6 +86,7 @@ type LoopEngine struct {
 	baseDir       string
 	goalMu        sync.Mutex
 	goalStack     []string
+	selfCorrection *SelfCorrectionEngine
 }
 
 // LoopState carries the full state of one run or one step.
@@ -133,16 +134,33 @@ func NewLoopEngine(
 	baseDir string,
 ) *LoopEngine {
 	return &LoopEngine{
-		engine:        engine,
-		executor:      executor,
-		taskStore:     taskStore,
-		memory:        mem,
-		contextAsm:    contextAsm,
-		toolRunner:    toolRunner,
-		provider:      prov,
-		cfg:           cfg,
-		baseDir:       baseDir,
+		engine:     engine,
+		executor:   executor,
+		taskStore:  taskStore,
+		memory:     mem,
+		contextAsm: contextAsm,
+		toolRunner: toolRunner,
+		provider:   prov,
+		cfg:        cfg,
+		baseDir:    baseDir,
 	}
+}
+
+// EnableSelfCorrection enables the self-correction system
+func (le *LoopEngine) EnableSelfCorrection(opts CorrectionOptions) {
+	le.selfCorrection = NewSelfCorrectionEngine(opts)
+}
+
+// SetSelfCorrectionProvider sets the LLM provider for self-correction
+func (le *LoopEngine) SetSelfCorrectionProvider(p provider.Provider) {
+	if le.selfCorrection != nil {
+		le.selfCorrection.SetProvider(p)
+	}
+}
+
+// DisableSelfCorrection disables the self-correction system
+func (le *LoopEngine) DisableSelfCorrection() {
+	le.selfCorrection = nil
 }
 
 // Run executes a full autonomous loop for the given goal and taskID.
@@ -232,6 +250,10 @@ func (le *LoopEngine) Run(ctx context.Context, goal, taskID string, maxIteration
 			JSON:        true,
 			Messages:    messages,
 			Tools:       le.providerToolSpecs(),
+			Reasoning: provider.ReasoningOptions{
+				Effort:       le.cfg.Reasoning.Effort,
+				BudgetTokens: le.cfg.Reasoning.BudgetTokens,
+			},
 		}
 
 		resp, err := le.provider.Complete(ctx, req)
@@ -303,6 +325,39 @@ func (le *LoopEngine) Run(ctx context.Context, goal, taskID string, maxIteration
 				Success:   success,
 				Output:    output,
 			})
+
+			// Self-correction: verify and attempt to fix errors
+			if le.selfCorrection != nil {
+				// Parse tool input for verification
+				var inputMap map[string]any
+				_ = json.Unmarshal(tc.Input, &inputMap)
+				// Convert tool call to action proposal for verification
+				action := tool.ActionProposal{
+					Type:   tc.Name,
+					Input:  inputMap,
+					Reason: "Auto-generated from tool call",
+				}
+				correctionResult := le.selfCorrection.CorrectAction(ctx, action, output, err)
+				if correctionResult.Attempts > 0 {
+					if correctionResult.Success && correctionResult.FixedAction != nil {
+						// Retry with fixed action
+						fixedPayload := correctionResult.FixedAction.Payload()
+						raw, err = le.toolRunner.Run(ctx, tc.Name, fixedPayload)
+						output = formatToolOutput(tc.Name, raw, err)
+						success = err == nil
+						// Update the last tool result
+						state.ToolResults[len(state.ToolResults)-1] = ToolResultEntry{
+							ToolName:  tc.Name,
+							RawOutput: raw,
+							Success:   success,
+							Output:    output + "\n[Self-corrected after " + fmt.Sprintf("%d", correctionResult.Attempts) + " attempt(s)]",
+						}
+					} else if correctionResult.Attempts > 0 {
+						output += "\n[Self-correction attempted: " + fmt.Sprintf("%d", correctionResult.Attempts) + " attempt(s), failed]"
+					}
+				}
+			}
+
 			content := fmt.Sprintf("[TOOL RESULT %s]\n%s", tc.Name, output)
 			if err != nil {
 				content = fmt.Sprintf("[TOOL ERROR %s]: %v", tc.Name, err)
@@ -347,6 +402,10 @@ func (le *LoopEngine) Step(ctx context.Context, goal, taskID string, messages []
 		JSON:        true,
 		Messages:    messages,
 		Tools:       le.providerToolSpecs(),
+		Reasoning: provider.ReasoningOptions{
+			Effort:       le.cfg.Reasoning.Effort,
+			BudgetTokens: le.cfg.Reasoning.BudgetTokens,
+		},
 	}
 
 	resp, err := le.provider.Complete(ctx, req)
@@ -512,6 +571,9 @@ func (le *LoopEngine) compactMessages(messages []provider.Message) []provider.Me
 		}
 		summary := fmt.Sprintf("[Prior conversation summarised — %d messages condensed]:\n%s",
 			lastAssistant-1, history.String())
+		if le.memory != nil {
+			_ = le.memory.UpdateProjectSummary(summary)
+		}
 		compacted = append(compacted, provider.Message{Role: "user", Content: summary})
 	}
 
