@@ -32,6 +32,7 @@ type Request struct {
 	Messages    []Message         `json:"messages"`
 	Tools       []ToolSpec        `json:"tools,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	Reasoning   ReasoningOptions  `json:"reasoning,omitempty"`
 }
 
 type Response struct {

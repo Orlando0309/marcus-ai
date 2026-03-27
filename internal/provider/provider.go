@@ -29,9 +29,9 @@ type CompletionOptions struct {
 
 // CompletionResponse holds the response from an LLM
 type CompletionResponse struct {
-	Text       string
-	Usage      Usage
-	ToolCalls  []ToolCall
+	Text         string
+	Usage        Usage
+	ToolCalls    []ToolCall
 	FinishReason string
 }
 
@@ -44,15 +44,20 @@ type Usage struct {
 
 // ToolCall represents a tool call from the LLM
 type ToolCall struct {
-	ID       string
-	Name     string
-	Input    json.RawMessage
+	ID    string
+	Name  string
+	Input json.RawMessage
+}
+
+type ReasoningOptions struct {
+	Effort       string `json:"effort,omitempty"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 // StreamChunk represents a chunk of streamed response
 type StreamChunk struct {
-	Text       string
-	Done       bool
-	ToolCall   *ToolCall
-	Usage      *Usage
+	Text     string
+	Done     bool
+	ToolCall *ToolCall
+	Usage    *Usage
 }

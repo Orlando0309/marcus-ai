@@ -8,6 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/marcus-ai/marcus/internal/config"
+	"github.com/marcus-ai/marcus/internal/task"
+	"github.com/marcus-ai/marcus/internal/tool"
 )
 
 func TestExtractUnifiedDiffSnippet(t *testing.T) {
@@ -31,12 +33,7 @@ func TestBuildDiffPaneSidePreview(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.layout()
-	m.sideDiffTitle = "Test"
-	m.sideDiffLive = "@@ -1 +1 @@\n-old\n+new\n"
-	m.diffViewport.SetContent(m.buildDiffPaneContent())
-	if m.diffViewport.TotalLineCount() == 0 {
-		t.Fatal("expected diff viewport content")
-	}
+	// Diff is now shown inline in the transcript
 }
 
 func TestTUIProgramSmoke(t *testing.T) {
@@ -67,5 +64,19 @@ func TestTUIProgramSmoke(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for program")
+	}
+}
+
+func TestFilterCompletionNoopActions(t *testing.T) {
+	actions := []tool.ActionProposal{
+		{Type: "run_command", Command: "echo Task done"},
+		{Type: "read_file", Path: "main.go"},
+	}
+	filtered := filterCompletionNoopActions(actions, task.StatusDone)
+	if len(filtered) != 1 {
+		t.Fatalf("expected one action after filtering, got %d", len(filtered))
+	}
+	if filtered[0].Type != "read_file" {
+		t.Fatalf("expected read_file to remain, got %s", filtered[0].Type)
 	}
 }

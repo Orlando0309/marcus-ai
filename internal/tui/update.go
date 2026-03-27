@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/marcus-ai/marcus/internal/flow"
 	"github.com/marcus-ai/marcus/internal/isolation"
 	"github.com/marcus-ai/marcus/internal/session"
 	"github.com/marcus-ai/marcus/internal/tool"
@@ -31,17 +32,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderTranscript()
 		return m, nil
 	case tea.MouseMsg:
-		switch m.focusPane {
-		case focusTranscript:
-			vp, cmd := m.viewport.Update(msg)
-			m.viewport = vp
-			return m, cmd
-		case focusDiffPane:
-			dv, cmd := m.diffViewport.Update(msg)
-			m.diffViewport = dv
-			return m, cmd
-		}
-		return m, nil
+		vp, cmd := m.viewport.Update(msg)
+		m.viewport = vp
+		return m, cmd
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case loopEventMsg:
@@ -59,9 +52,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addItem(event.kind, event.title, event.body, event.meta)
 			return m, waitForLoopEvent(msg.ch)
 		case sideDiffMsg:
+			// Diff is now shown inline in the transcript
 			m.sideDiffLive = event.text
 			m.sideDiffTitle = event.title
-			m.refreshDiffPane()
 			return m, waitForLoopEvent(msg.ch)
 		case assistantResponseMsg:
 			updatedModel, cmd := m.Update(event)
@@ -104,12 +97,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.chunk.Text != "" {
 			m.streamBuffer.WriteString(msg.chunk.Text)
-			if m.width >= 100 && m.diffViewport.Width > 0 {
-				if sn := extractUnifiedDiffSnippet(m.streamBuffer.String()); sn != "" {
-					m.streamDiffSnippet = sn
-					m.refreshDiffPane()
-				}
-			}
 			m.updateActivity(
 				"Calling provider and streaming response...",
 				fmt.Sprintf("Received %d characters so far.", m.streamBuffer.Len()),
@@ -124,6 +111,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.status = "response failed"
 			m.finishActivity("Provider Error", msg.err.Error(), "failed")
+			m.CompletePlan()
 			return m, nil
 		}
 		m.latestContext = msg.context
@@ -160,7 +148,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			m.pending = append(m.pending, pendingAction{Proposal: proposal, Preview: preview})
-			m.addItem("action", preview.Summary, preview.Diff, proposal.Reason)
+
+			// Format the action title in Claude Code style: "path/to/file — X lines"
+			title := preview.Summary
+			if proposal.Type == "write_file" && proposal.Path != "" {
+				lineCount := strings.Count(preview.Diff, "\n+")
+				if lineCount == 0 {
+					lineCount = strings.Count(proposal.Content, "\n") + 1
+				}
+				title = fmt.Sprintf("%s — %d lines", proposal.Path, lineCount)
+			}
+
+			m.addItem("action", title, preview.Diff, proposal.Reason)
 		}
 		if len(m.pending) > 0 {
 			m.sideDiffLive = ""
@@ -168,11 +167,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("%d action(s) pending approval", len(m.pending))
 			m.addItem("system", "Approval Required", "Press `y` to apply pending actions or `n` to discard them.", "")
 			m.clampPendingDiffIndex()
-			m.refreshDiffPane()
 		} else {
 			m.status = "ready"
 			m.pendingDiffIndex = 0
-			m.refreshDiffPane()
 		}
 		m.persistSession()
 		return m, nil
@@ -180,17 +177,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.addItem("error", "Apply Failed", msg.err.Error(), "")
 			m.status = "apply failed"
-			
+
 			m.agentContMu.Lock()
 			cont := m.agentContinuation
 			m.agentContMu.Unlock()
-			
+
 			if cont != nil {
 				cont.toolResults = append(cont.toolResults, fmt.Sprintf("Apply Failed: %s", msg.err.Error()))
 				m.busy = true
 				m.retryCount = 0
 				return m, m.resumeAgentLoopCmd(cont)
 			}
+			m.CompletePlan()
 			return m, nil
 		}
 		if msg.session != nil && msg.session.Mode == isolation.ModeWorktree {
@@ -229,7 +227,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingDiffIndex = 0
 		m.sideDiffLive = ""
 		m.sideDiffTitle = ""
-		m.refreshDiffPane()
 		m.status = "actions applied"
 		m.addItem("system", "Apply Complete", "Pending actions were executed.", "")
 
@@ -284,10 +281,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		vp, cmd := m.viewport.Update(msg)
 		m.viewport = vp
 		return m, cmd
-	case focusDiffPane:
-		dv, cmd := m.diffViewport.Update(msg)
-		m.diffViewport = dv
-		return m, cmd
 	default:
 		ta, cmd := m.textarea.Update(msg)
 		m.textarea = ta
@@ -296,15 +289,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.focusPane == focusDiffPane {
-		switch msg.Type {
-		case tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown, tea.KeyHome, tea.KeyEnd:
-			dv, cmd := m.diffViewport.Update(msg)
-			m.diffViewport = dv
-			return m, cmd
-		}
-	}
-
 	switch msg.Type {
 	case tea.KeyCtrlC, tea.KeyCtrlQ:
 		m.persistSession()
@@ -333,7 +317,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.pending = nil
 		m.pendingDiffIndex = 0
-		m.refreshDiffPane()
 		m.addItem("system", "Pending Actions Cleared", "Discarded all pending proposals.", "")
 		m.status = "pending actions discarded"
 		m.persistSession()
@@ -354,7 +337,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.pending = nil
 				m.pendingDiffIndex = 0
-				m.refreshDiffPane()
 				m.addItem("system", "Pending Actions Cleared", "Discarded all pending proposals.", "")
 				m.status = "pending actions discarded"
 				m.persistSession()
@@ -366,13 +348,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.pendingDiffIndex < 0 {
 					m.pendingDiffIndex = len(m.pending) - 1
 				}
-				m.refreshDiffPane()
 				return m, nil
 			}
 		case "]":
 			if len(m.pending) > 1 {
 				m.pendingDiffIndex = (m.pendingDiffIndex + 1) % len(m.pending)
-				m.refreshDiffPane()
 				return m, nil
 			}
 		}
@@ -437,20 +417,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		vp, cmd := m.viewport.Update(msg)
 		m.viewport = vp
 		return m, cmd
-	default:
-		dv, cmd := m.diffViewport.Update(msg)
-		m.diffViewport = dv
-		return m, cmd
 	}
+	return m, nil
 }
 
 func (m *Model) cycleFocus() {
-	maxF := focusDiffPane
-	if m.width < 100 {
-		maxF = focusTranscript
-	}
 	m.focusPane++
-	if m.focusPane > maxF {
+	if m.focusPane > focusTranscript {
 		m.focusPane = focusComposer
 	}
 	if m.focusPane == focusComposer {
@@ -504,11 +477,12 @@ func (m *Model) applyPendingActions() tea.Cmd {
 			return appliedActionsMsg{err: err}
 		}
 		runner, err := tool.BuildRunner(tool.BuildOptions{
-			BaseDir:   isoSession.Root,
-			Config:    m.cfg,
-			Folders:   m.flowEngine.FolderEngine(),
-			CodeIndex: m.codeIndex,
-			LSP:       m.lspBroker,
+			BaseDir:        isoSession.Root,
+			Config:         m.cfg,
+			Folders:        m.flowEngine.FolderEngine(),
+			CodeIndex:      m.codeIndex,
+			LSP:            m.lspBroker,
+			SubagentRunner: flow.NewSubagentRunner(m.flowEngine.FolderEngine(), m.cfg, isoSession.Root),
 		})
 		if err != nil {
 			return appliedActionsMsg{err: err}
@@ -543,6 +517,8 @@ func (m *Model) resetSession() tea.Model {
 	m.status = "new session"
 	m.activityIndex = -1
 	m.taskBoardIndex = -1
+	m.thinkingCardIndex = -1
+	m.currentThinkingCard = -1
 	m.textarea.SetValue("")
 	m.bootstrapTranscript()
 	m.persistSession()

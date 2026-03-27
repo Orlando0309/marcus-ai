@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/marcus-ai/marcus/internal/provider"
 )
 
 // Turn is a single conversation turn in a Marcus session.
@@ -21,14 +23,28 @@ type ActionLog struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Event captures structured session activity for resume and auditability.
+type Event struct {
+	Kind      string            `json:"kind"`
+	Role      string            `json:"role,omitempty"`
+	Name      string            `json:"name,omitempty"`
+	Content   string            `json:"content,omitempty"`
+	Input     string            `json:"input,omitempty"`
+	Status    string            `json:"status,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+}
+
 // Session is the persisted chat state.
 type Session struct {
-	ID          string      `json:"id"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
-	Turns       []Turn      `json:"turns"`
-	Actions     []ActionLog `json:"actions"`
-	LastContext string      `json:"last_context,omitempty"`
+	ID               string             `json:"id"`
+	CreatedAt        time.Time          `json:"created_at"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	Turns            []Turn             `json:"turns"`
+	Actions          []ActionLog        `json:"actions"`
+	Events           []Event            `json:"events,omitempty"`
+	ProviderMessages []provider.Message `json:"provider_messages,omitempty"`
+	LastContext      string             `json:"last_context,omitempty"`
 }
 
 // Store persists sessions under `.marcus/sessions/`.
@@ -94,6 +110,12 @@ func (s *Session) AppendTurn(role, content string, maxTurns int) {
 		Content:   content,
 		CreatedAt: time.Now().UTC(),
 	})
+	s.Events = append(s.Events, Event{
+		Kind:      "turn",
+		Role:      role,
+		Content:   content,
+		CreatedAt: time.Now().UTC(),
+	})
 	if maxTurns > 0 && len(s.Turns) > maxTurns {
 		s.Turns = s.Turns[len(s.Turns)-maxTurns:]
 	}
@@ -107,7 +129,45 @@ func (s *Session) AppendAction(label, status string) {
 		Status:    status,
 		CreatedAt: time.Now().UTC(),
 	})
+	s.Events = append(s.Events, Event{
+		Kind:      "action",
+		Name:      label,
+		Status:    status,
+		CreatedAt: time.Now().UTC(),
+	})
 	s.UpdatedAt = time.Now().UTC()
+}
+
+// AppendEvent records one structured event in the session history.
+func (s *Session) AppendEvent(kind, role, name, content, input, status string, metadata map[string]string) {
+	s.Events = append(s.Events, Event{
+		Kind:      kind,
+		Role:      role,
+		Name:      name,
+		Content:   content,
+		Input:     input,
+		Status:    status,
+		Metadata:  metadata,
+		CreatedAt: time.Now().UTC(),
+	})
+	s.UpdatedAt = time.Now().UTC()
+}
+
+// SetProviderMessages stores the structured message transcript used by the agent loop.
+func (s *Session) SetProviderMessages(messages []provider.Message, maxMessages int) {
+	if maxMessages > 0 && len(messages) > maxMessages {
+		messages = messages[len(messages)-maxMessages:]
+	}
+	s.ProviderMessages = append([]provider.Message(nil), messages...)
+	s.UpdatedAt = time.Now().UTC()
+}
+
+// RecentProviderMessages returns the newest provider messages up to n.
+func (s *Session) RecentProviderMessages(n int) []provider.Message {
+	if n <= 0 || len(s.ProviderMessages) <= n {
+		return append([]provider.Message(nil), s.ProviderMessages...)
+	}
+	return append([]provider.Message(nil), s.ProviderMessages[len(s.ProviderMessages)-n:]...)
 }
 
 // RecentTurns returns the newest turns up to n.

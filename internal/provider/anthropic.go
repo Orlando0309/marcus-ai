@@ -41,12 +41,18 @@ func (p *AnthropicProvider) Name() string {
 
 // anthropicRequest represents the Anthropic API request body
 type anthropicRequest struct {
-	Model     string         `json:"model"`
-	MaxTokens int            `json:"max_tokens"`
-	System    string         `json:"system,omitempty"`
-	Messages  []messageParam `json:"messages"`
-	Tools     []anthropicTool `json:"tools,omitempty"`
-	Stream    bool           `json:"stream,omitempty"`
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	System    string             `json:"system,omitempty"`
+	Messages  []messageParam     `json:"messages"`
+	Tools     []anthropicTool    `json:"tools,omitempty"`
+	Thinking  *anthropicThinking `json:"thinking,omitempty"`
+	Stream    bool               `json:"stream,omitempty"`
+}
+
+type anthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 type messageParam struct {
@@ -321,6 +327,12 @@ func buildAnthropicRequest(req Request, stream bool) (anthropicRequest, error) {
 		Model:     model,
 		MaxTokens: maxTokens,
 		Stream:    stream,
+	}
+	if req.Reasoning.BudgetTokens > 0 {
+		reqBody.Thinking = &anthropicThinking{
+			Type:         "enabled",
+			BudgetTokens: req.Reasoning.BudgetTokens,
+		}
 	}
 	for _, msg := range req.Messages {
 		if strings.TrimSpace(msg.Content) == "" {

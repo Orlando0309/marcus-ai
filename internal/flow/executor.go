@@ -36,11 +36,12 @@ func NewFlowExecutor(fe *folder.FolderEngine, cfg *config.Config, baseDir string
 	_ = index.Build(context.Background())
 	broker := lsp.NewBroker(cfg.LSP, baseDir)
 	tr, _ := tool.BuildRunner(tool.BuildOptions{
-		BaseDir:   baseDir,
-		Config:    cfg,
-		Folders:   fe,
-		CodeIndex: index,
-		LSP:       broker,
+		BaseDir:        baseDir,
+		Config:         cfg,
+		Folders:        fe,
+		CodeIndex:      index,
+		LSP:            broker,
+		SubagentRunner: NewSubagentRunner(fe, cfg, baseDir),
 	})
 	return &FlowExecutor{
 		folderEngine: fe,
@@ -96,6 +97,15 @@ func (fe *FlowExecutor) Execute(ctx context.Context, flowName string, data Templ
 		return nil, fmt.Errorf("get provider: %w", err)
 	}
 
+	if len(flow.Tools) > 0 {
+		_ = prov
+		iterations := 6
+		if fe.cfg != nil && fe.cfg.Autonomy.MaxIterations > 0 {
+			iterations = fe.cfg.Autonomy.MaxIterations
+		}
+		return fe.ExecuteWithTools(ctx, flowName, data, iterations)
+	}
+
 	// Execute based on streaming setting
 	if flow.Behavior.Stream {
 		return fe.executeStreaming(ctx, prov, renderedPrompt, flow)
@@ -124,6 +134,10 @@ func (fe *FlowExecutor) executeBlocking(ctx context.Context, prov provider.Provi
 		MaxTokens:   flow.Model.MaxTokens,
 		Messages:    []provider.Message{{Role: "user", Content: prompt}},
 		Tools:       toolSpecs(fe.toolRunner.Scoped(flow.Tools)),
+		Reasoning: provider.ReasoningOptions{
+			Effort:       fe.cfg.Reasoning.Effort,
+			BudgetTokens: fe.cfg.Reasoning.BudgetTokens,
+		},
 	}
 
 	if fe.notify != nil {
@@ -167,6 +181,10 @@ func (fe *FlowExecutor) executeStreaming(ctx context.Context, prov provider.Prov
 		MaxTokens:   flow.Model.MaxTokens,
 		Messages:    []provider.Message{{Role: "user", Content: prompt}},
 		Tools:       toolSpecs(fe.toolRunner.Scoped(flow.Tools)),
+		Reasoning: provider.ReasoningOptions{
+			Effort:       fe.cfg.Reasoning.Effort,
+			BudgetTokens: fe.cfg.Reasoning.BudgetTokens,
+		},
 	}
 
 	if fe.notify != nil {
@@ -279,6 +297,10 @@ func (fe *FlowExecutor) ExecuteWithTools(ctx context.Context, flowName string, d
 			MaxTokens:   flow.Model.MaxTokens,
 			Messages:    messages,
 			Tools:       toolSpecs(runner),
+			Reasoning: provider.ReasoningOptions{
+				Effort:       fe.cfg.Reasoning.Effort,
+				BudgetTokens: fe.cfg.Reasoning.BudgetTokens,
+			},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("provider complete: %w", err)
@@ -415,13 +437,6 @@ func ApplyDiff(filePath, diff string, baseDir string) error {
 
 // RunShellTool executes a shell-based tool from a folder
 func RunShellTool(ctx context.Context, toolPath, scriptName string, input json.RawMessage) (json.RawMessage, error) {
-	var shellCmd string
-	if runtime.GOOS == "windows" {
-		shellCmd = "cmd"
-	} else {
-		shellCmd = "sh"
-	}
-
 	scriptPath := filepath.Join(toolPath, scriptName)
 	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("script not found: %s", scriptPath)
@@ -433,7 +448,12 @@ func RunShellTool(ctx context.Context, toolPath, scriptName string, input json.R
 	}
 
 	// Write input to stdin
-	cmd := exec.CommandContext(ctx, shellCmd, scriptPath)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "cmd", "/c", scriptPath)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", scriptPath)
+	}
 	cmd.Stdin = strings.NewReader(string(input))
 
 	output, err := cmd.CombinedOutput()

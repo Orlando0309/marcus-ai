@@ -11,24 +11,28 @@ import (
 
 // Config holds the merged Marcus configuration.
 type Config struct {
-	MarcusVersion string  `toml:"marcus_version"`
-	Provider      string  `toml:"provider"`
-	Model         string  `toml:"model"`
-	Temperature   float64 `toml:"temperature"`
-	MaxTokens     int     `toml:"max_tokens"`
-	HotReload     bool    `toml:"hot_reload"`
-	Theme         string  `toml:"theme"`
+	MarcusVersion string `toml:"marcus_version"`
+	Provider      string `toml:"provider"`
+	// ProviderFallbacks lists extra providers tried in order if the primary errors at runtime (e.g. openai, ollama).
+	ProviderFallbacks []string `toml:"provider_fallbacks"`
+	Model             string   `toml:"model"`
+	Temperature       float64  `toml:"temperature"`
+	MaxTokens         int      `toml:"max_tokens"`
+	HotReload         bool     `toml:"hot_reload"`
+	Theme             string   `toml:"theme"`
 
 	Project     ProjectConfig   `toml:"project"`
 	Session     SessionConfig   `toml:"session"`
 	Context     ContextConfig   `toml:"context"`
 	Tools       ToolsConfig     `toml:"tools"`
 	ProviderCfg ProviderConfig  `toml:"provider_runtime"`
+	Reasoning   ReasoningConfig `toml:"reasoning"`
 	Memory      MemoryConfig    `toml:"memory"`
 	LSP         LSPConfig       `toml:"lsp"`
 	Autonomy    AutonomyConfig  `toml:"autonomy"`
 	Isolation   IsolationConfig `toml:"isolation"`
 	Runtime     RuntimeConfig   `toml:"runtime"`
+	Hooks       HooksConfig     `toml:"hooks"`
 
 	GlobalPath  string `toml:"-"`
 	ProjectPath string `toml:"-"`
@@ -52,9 +56,9 @@ type ContextConfig struct {
 	AlwaysInclude     []string `toml:"always_include"`
 	MaxFileBytes      int      `toml:"max_file_bytes"`
 	MaxFilesPerPrompt int      `toml:"max_files_per_prompt"`
-	MaxContextTokens  int      `toml:"max_context_tokens"`  // hard cap on estimated context tokens
-	WarnAtPercent     int      `toml:"warn_at_percent"`     // warn user when context reaches this %
-	CompactAtPercent int      `toml:"compact_at_percent"`  // trigger auto-compact at this %
+	MaxContextTokens  int      `toml:"max_context_tokens"` // hard cap on estimated context tokens
+	WarnAtPercent     int      `toml:"warn_at_percent"`    // warn user when context reaches this %
+	CompactAtPercent  int      `toml:"compact_at_percent"` // trigger auto-compact at this %
 }
 
 type ToolsConfig struct {
@@ -62,8 +66,22 @@ type ToolsConfig struct {
 	Manifest   ManifestToolConfig   `toml:"manifest"`
 }
 
+type HooksConfig struct {
+	PreToolUse  []HookRule `toml:"pre_tool_use"`
+	PostToolUse []HookRule `toml:"post_tool_use"`
+}
+
+type HookRule struct {
+	Matcher  string   `toml:"matcher"`
+	Commands []string `toml:"commands"`
+}
+
 type RunCommandToolConfig struct {
-	AlwaysAllow []string `toml:"always_allow"`
+	AlwaysAllow       []string `toml:"always_allow"`
+	AllowPrefixes     []string `toml:"allow_prefixes"`
+	BlockedSubstrings []string `toml:"blocked_substrings"`
+	// StrictAllowlist rejects any run_command that does not match AlwaysAllow or AllowPrefixes.
+	StrictAllowlist bool `toml:"strict_allowlist"`
 }
 
 type ManifestToolConfig struct {
@@ -74,6 +92,11 @@ type ProviderConfig struct {
 	CacheEnabled bool `toml:"cache_enabled"`
 	BatchEnabled bool `toml:"batch_enabled"`
 	MaxBatchSize int  `toml:"max_batch_size"`
+}
+
+type ReasoningConfig struct {
+	Effort       string `toml:"effort"`
+	BudgetTokens int    `toml:"budget_tokens"`
 }
 
 type MemoryConfig struct {
@@ -110,7 +133,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		MarcusVersion: "1.0.0",
 		Provider:      "ollama",
-		Model:         "glm-5:cloud",
+		Model:         "qwen3.5:397b-cloud",
 		Temperature:   0.3,
 		MaxTokens:     4096,
 		HotReload:     true,
@@ -122,6 +145,7 @@ func DefaultConfig() *Config {
 		},
 		Context: ContextConfig{
 			AlwaysInclude: []string{
+				".marcus/context/PROJECT_MAP.md",
 				".marcus/context/ARCHITECTURE.md",
 				".marcus/context/CONVENTIONS.md",
 				".marcus/context/TASKS.md",
@@ -136,6 +160,10 @@ func DefaultConfig() *Config {
 			CacheEnabled: true,
 			BatchEnabled: true,
 			MaxBatchSize: 4,
+		},
+		Reasoning: ReasoningConfig{
+			Effort:       "medium",
+			BudgetTokens: 2048,
 		},
 		Memory: MemoryConfig{
 			RecallLimit: 8,
@@ -155,6 +183,13 @@ func DefaultConfig() *Config {
 			RiskyFileWrites: 4,
 		},
 		Tools: ToolsConfig{
+			RunCommand: RunCommandToolConfig{
+				BlockedSubstrings: []string{
+					"| sh", "| bash", "|sh ", "; sh ", "; bash ",
+					"&& curl ", "| curl ", "; curl ",
+					"rm -rf /", "rm -rf \\", "mkfs.", "dd if=/dev/",
+				},
+			},
 			Manifest: ManifestToolConfig{
 				AutoApprovePermissions: []string{"read", "safe", "inspect"},
 			},
@@ -283,7 +318,7 @@ func InitProject(root string) error {
 	configContents := strings.TrimSpace(fmt.Sprintf(`
 marcus_version = "1.0.0"
 provider = "ollama"
-model = "glm-5:cloud"
+model = "qwen3.5:397b-cloud"
 temperature = 0.3
 max_tokens = 4096
 hot_reload = true
@@ -300,6 +335,7 @@ max_turns = 200
 
 [context]
 always_include = [
+  ".marcus/context/PROJECT_MAP.md",
   ".marcus/context/ARCHITECTURE.md",
   ".marcus/context/CONVENTIONS.md",
   ".marcus/context/TASKS.md",
@@ -355,28 +391,47 @@ You are **Marcus Coding Agent**, an autonomous software engineer for real reposi
 - Prefer the smallest safe diff that solves the task.
 - Match existing patterns instead of inventing new ones.
 - Verify every meaningful change.
+- Explain progress briefly and keep machine-only structure out of user-facing prose.
 
 ## Orientation before edits
-1. Read project docs and attached context first.
+Before proposing writes:
+1. Read the generated project map and project docs already in context first.
 2. Identify the single most likely file or subsystem involved.
-3. Use targeted reads/searches to confirm existing patterns.
-4. Expand exploration only if needed.
+3. Use targeted reads and searches to confirm the existing pattern.
+4. Only broaden exploration if the first file is not enough.
+
+Do not scan the whole repository by default. Avoid broad "list_files" passes when a targeted "read_file", "search_code", or symbol lookup will answer the question faster.
 
 ## Iteration loop
-1. Orient
-2. Inspect
-3. Plan
-4. Execute
-5. Verify
-6. Complete
+1. **Orient** — understand the stack, structure, conventions, and the relevant existing pattern.
+2. **Inspect** — use safe tools to confirm the exact file(s) and imports involved.
+3. **Plan** — choose the smallest viable change and the right verification step.
+4. **Execute** — write files and run commands as needed.
+5. **Verify** — build, run the relevant test, or perform the narrowest useful smoke check.
+6. **Complete** — finish only when the requested outcome is actually satisfied.
+
+## Engineering discipline
+- Search for the concept before creating new files or abstractions.
+- Keep refactors separate from feature or bug-fix work unless the user asked for both.
+- When debugging, reproduce first, form one hypothesis, add one observation, then change code.
+- Read failures carefully and fix the specific cause rather than guessing.
+- Tests should express intent and behavior, not implementation trivia.
+- Comments should explain *why* when the code is not already obvious.
 
 ## Output rules
 - Always return valid JSON with "message", "actions", and "tasks".
-- Keep "message" concise and human-readable.
-- Keep edits complete and reviewable.
-- Put verification after writes.
-- Use task statuses: active, done, blocked.
-- Never use markdown fences in JSON output.
+- Keep "message" brief, human-readable, and free of raw JSON.
+- When writing files, always include complete file contents.
+- Put verification commands after the writes they validate.
+- For "run_command", emit the exact shell command Marcus should run on the current platform. Do not use JSON-style escaped quotes like "\\\"" inside the command string.
+- Use the task system: mark tasks "active" when starting, "done" when complete, "blocked" when stuck.
+- Never use markdown fences in your JSON response.
+- If a command is not auto-approved, it will be shown to the user for approval.
+
+## Project map discipline
+- Marcus maintains ".marcus/context/PROJECT_MAP.md" from a bounded repo scan.
+- Start from that generated map instead of scanning directories when it already answers where to begin.
+- If you learn a durable repo fact that future tasks should know, update the generated map before finishing.
 `
 
 	codingAgentRules := "# Coding Agent \u2014 Partition Rules\n\nThese rules define which actions Marcus auto-runs vs. asks approval for.\n\n## Safe actions (always auto-run)\n- `list_files` \u2014 browse directory structure\n- `read_file` \u2014 inspect file contents\n- `search_code` \u2014 regex search across files\n- `find_symbol` \u2014 find a function/type definition\n- `list_symbols` \u2014 list symbols in a file\n\n## Auto-run commands (no approval needed)\nAny `run_command` that starts with one of these prefixes is auto-approved:\n- `go build`\n- `go build ./...`\n- `cargo build`\n- `cargo build 2>&1`\n- `npm run build`\n- `npm run build 2>&1`\n- `ruff check`\n- `ruff check .`\n- `ruff format`\n- `go test`\n- `go test ./...`\n- `go vet`\n- `golangci-lint run`\n- `python -m py_compile`\n- `mvn compile`\n- `gradle build`\n- `make`\n- `cmake --build`\n- Any `go run` that runs a specific file (not a general `go run`)\n\n## Write file policy\n- `write_if = \"first_wave\"` \u2014 auto-run when there is exactly ONE write_file action and NO run_command in the same batch\n- If there are multiple writes or a write + run_command mix, all writes go to pending (ask user approval)\n\n## Verification\n- `verification = \"detect\"` \u2014 after any write_file, detect the project type and run the appropriate build command automatically\n- If `verification = \"always\"`, always run verification after writes\n- If `verification = \"never\"`, skip verification after writes\n- To override the detected command, add a specific command: e.g. `verification = \"go test ./...\"`\n\n## Step mode\n- `step_mode = false` \u2014 by default, run autonomously without pausing\n- If `step_mode = true`, pause after each iteration and wait for user to press Space to continue\n"
@@ -426,8 +481,8 @@ auto_run_commands = ["go build", "go build ./...", "cargo build", "cargo build 2
 write_if = "first_wave"
 step_mode = false
 `,
-		filepath.Join(marcusPath, "agents", "coding_agent", "system.md"):   codingAgentSystem,
-		filepath.Join(marcusPath, "agents", "coding_agent", "rules.md"):     codingAgentRules,
+		filepath.Join(marcusPath, "agents", "coding_agent", "system.md"): codingAgentSystem,
+		filepath.Join(marcusPath, "agents", "coding_agent", "rules.md"):  codingAgentRules,
 		filepath.Join(marcusPath, "agents", "general_agent", "agent.toml"): `[agent]
 name = "general_agent"
 role = "general"
@@ -449,8 +504,8 @@ step_mode = true
 
 		// Context
 		filepath.Join(marcusPath, "context", "ARCHITECTURE.md"): architectureMd,
-		filepath.Join(marcusPath, "context", "CONVENTIONS.md"): conventionsMd,
-		filepath.Join(marcusPath, "context", "TASKS.md"):         tasksMd,
+		filepath.Join(marcusPath, "context", "CONVENTIONS.md"):  conventionsMd,
+		filepath.Join(marcusPath, "context", "TASKS.md"):        tasksMd,
 
 		// Flows \u2014 app_plan
 		filepath.Join(marcusPath, "flows", "app_plan", "flow.toml"): `[flow]
@@ -461,7 +516,7 @@ author = "marcus"
 
 [model]
 provider = "ollama"
-model = "glm-5:cloud"
+model = "qwen3.5:397b-cloud"
 temperature = 0.2
 max_tokens = 4096
 
@@ -497,7 +552,7 @@ author = "marcus"
 
 [model]
 provider = "ollama"
-model = "glm-5:cloud"
+model = "qwen3.5:397b-cloud"
 temperature = 0.2
 max_tokens = 4096
 
@@ -533,7 +588,7 @@ author = "marcus"
 
 [model]
 provider = "ollama"
-model = "glm-5:cloud"
+model = "qwen3.5:397b-cloud"
 temperature = 0.7
 max_tokens = 4096
 
@@ -574,7 +629,7 @@ author = "marcus"
 
 [model]
 provider = "ollama"
-model = "glm-5:cloud"
+model = "qwen3.5:397b-cloud"
 temperature = 0.3
 max_tokens = 4096
 
@@ -602,7 +657,7 @@ author = "marcus"
 
 [model]
 provider = "ollama"
-model = "glm-5:cloud"
+model = "qwen3.5:397b-cloud"
 temperature = 0.3
 max_tokens = 4096
 

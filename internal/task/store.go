@@ -289,6 +289,11 @@ func (s *Store) workflowPath() string {
 	return filepath.Join(s.root, "workflow.json")
 }
 
+// SlugifyForTool exposes the same task id normalization used by ApplyUpdates.
+func SlugifyForTool(title string) string {
+	return slugify(title)
+}
+
 // SaveDAG persists a workflow DAG next to task JSON files.
 func (s *Store) SaveDAG(d *DAG) error {
 	if s.root == "" || d == nil {

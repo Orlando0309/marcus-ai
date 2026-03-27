@@ -15,11 +15,9 @@ func (m *Model) View() string {
 	if !m.ready {
 		return "Initializing Marcus..."
 	}
+
+	// Single-pane layout like Claude Code
 	main := m.styles.TranscriptPane.Render(m.viewport.View())
-	if m.width >= 100 && m.diffViewport.Width > 0 {
-		diffCol := m.styles.DiffPane.Render(m.diffViewport.View())
-		main = lipgloss.JoinHorizontal(lipgloss.Top, main, diffCol)
-	}
 
 	// Build the bottom section with help and optional bottom bar
 	bottomSection := m.styles.Help.Render(m.renderHelp())
@@ -255,32 +253,10 @@ func (m *Model) layout() {
 	if width < 60 {
 		width = 60
 	}
-	split := width >= 100
-	if split {
-		gap := 1
-		leftW := (width - gap) * 58 / 100
-		rightW := width - gap - leftW
-		borderPad := 4
-		if rightW < borderPad+12 {
-			rightW = borderPad + 12
-			leftW = width - gap - rightW
-		}
-		m.viewport.Width = leftW - 2
-		m.viewport.Height = availableHeight
-		m.diffViewport.Width = rightW - borderPad
-		if m.diffViewport.Width < 12 {
-			m.diffViewport.Width = 12
-		}
-		m.diffViewport.Height = availableHeight
-	} else {
-		m.viewport.Width = width - 2
-		m.viewport.Height = availableHeight
-		m.diffViewport.Width = 0
-		m.diffViewport.Height = 0
-	}
+	m.viewport.Width = width - 2
+	m.viewport.Height = availableHeight
 	m.textarea.SetWidth(width - 4)
 	m.textarea.SetHeight(3)
-	m.refreshDiffPane()
 }
 
 func (m *Model) clampPendingDiffIndex() {
@@ -424,29 +400,77 @@ func (m *Model) renderStyledDiff(summary, diffText string, current, total int) s
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m *Model) refreshDiffPane() {
-	m.diffViewport.SetContent(m.buildDiffPaneContent())
-}
-
 func (m *Model) addItem(kind, title, body, meta string) {
-	m.transcript = append(m.transcript, transcriptItem{
+	item := transcriptItem{
 		Kind:  kind,
 		Title: title,
 		Body:  body,
 		Meta:  meta,
+	}
+
+	// If we're in a thinking card, add as subitem instead
+	if kind != "thinking" && m.currentThinkingCard >= 0 && m.currentThinkingCard < len(m.transcript) {
+		m.transcript[m.currentThinkingCard].SubItems = append(
+			m.transcript[m.currentThinkingCard].SubItems,
+			item,
+		)
+		m.renderTranscript()
+		return
+	}
+
+	m.transcript = append(m.transcript, item)
+	m.renderTranscript()
+}
+
+// addSubItem adds a sub-item under the current thinking card
+func (m *Model) addSubItem(kind, title, body, meta string) {
+	if m.currentThinkingCard < 0 || m.currentThinkingCard >= len(m.transcript) {
+		// No active thinking card, add as top-level
+		m.addItem(kind, title, body, meta)
+		return
+	}
+
+	m.transcript[m.currentThinkingCard].SubItems = append(
+		m.transcript[m.currentThinkingCard].SubItems,
+		transcriptItem{
+			Kind:  kind,
+			Title: title,
+			Body:  body,
+			Meta:  meta,
+		},
+	)
+	m.renderTranscript()
+}
+
+// startThinkingCard starts a new thinking card for grouping sub-items
+func (m *Model) startThinkingCard(body, meta string) {
+	m.currentThinkingCard = len(m.transcript)
+	m.transcript = append(m.transcript, transcriptItem{
+		Kind:     "thinking",
+		Body:     body,
+		Meta:     meta,
+		SubItems: []transcriptItem{},
 	})
 	m.renderTranscript()
+}
+
+// endThinkingCard ends the current thinking card
+func (m *Model) endThinkingCard() {
+	m.currentThinkingCard = -1
 }
 
 func (m *Model) updateTranscriptItem(index int, kind, title, body, meta string) {
 	if index < 0 || index >= len(m.transcript) {
 		return
 	}
+	// Preserve existing SubItems when updating
+	existingSubItems := m.transcript[index].SubItems
 	m.transcript[index] = transcriptItem{
-		Kind:  kind,
-		Title: title,
-		Body:  body,
-		Meta:  meta,
+		Kind:     kind,
+		Title:    title,
+		Body:     body,
+		Meta:     meta,
+		SubItems: existingSubItems,
 	}
 	m.renderTranscript()
 }
@@ -536,6 +560,7 @@ func (m *Model) finishActivity(title, body, meta string) {
 		m.transcript[m.thinkingCardIndex].Meta = ""
 		m.renderTranscript()
 		m.thinkingCardIndex = -1
+		m.currentThinkingCard = -1
 	}
 
 	if m.activityIndex >= 0 && m.activityIndex < len(m.transcript) {
@@ -558,6 +583,7 @@ func (m *Model) updateActivity(body, meta, phase string) {
 
 		if m.thinkingCardIndex < 0 || m.thinkingCardIndex >= len(m.transcript) {
 			m.thinkingCardIndex = len(m.transcript)
+			m.currentThinkingCard = m.thinkingCardIndex
 			m.addItem("thinking", m.cookingFrame(), body, meta)
 		}
 	}

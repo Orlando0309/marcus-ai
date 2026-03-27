@@ -241,13 +241,44 @@ func (m *Manager) EpisodicSummary(maxLines int) string {
 func (m *Manager) Summary(query string, limit int) string {
 	entries, err := m.Recall(query, limit)
 	if err != nil || len(entries) == 0 {
+		if ps := m.ProjectSummary(); ps != "" {
+			return "Project Summary:\n" + ps
+		}
 		return "No durable memory recalled."
 	}
 	lines := make([]string, 0, len(entries))
+	if ps := m.ProjectSummary(); ps != "" {
+		lines = append(lines, "- [project/summary] Current Project Summary: "+trim(ps, 180))
+	}
 	for _, entry := range entries {
 		lines = append(lines, "- ["+entry.Scope+"/"+entry.Kind+"] "+entry.Title+": "+trim(entry.Content, 180))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m *Manager) ProjectSummary() string {
+	if m.root == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(m.root, "project_summary.md"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func (m *Manager) UpdateProjectSummary(summary string) error {
+	if m.root == "" {
+		return nil
+	}
+	if err := m.EnsureStructure(); err != nil {
+		return err
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return nil
+	}
+	return os.WriteFile(filepath.Join(m.root, "project_summary.md"), []byte(summary+"\n"), 0644)
 }
 
 func (m *Manager) List() ([]Entry, error) {

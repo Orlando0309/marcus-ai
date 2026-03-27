@@ -36,12 +36,13 @@ type openAIToolUse struct {
 }
 
 type openAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	Tools       []openAITool    `json:"tools,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []openAIMessage `json:"messages"`
+	Tools           []openAITool    `json:"tools,omitempty"`
+	Temperature     float64         `json:"temperature,omitempty"`
+	MaxTokens       int             `json:"max_tokens,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 }
 
 type openAITool struct {
@@ -83,6 +84,9 @@ func buildOpenAIRequest(req Request, stream bool) (openAIRequest, error) {
 		Temperature: req.Temperature,
 		MaxTokens:   maxTok,
 		Stream:      stream,
+	}
+	if effort := strings.TrimSpace(req.Reasoning.Effort); effort != "" {
+		out.ReasoningEffort = effort
 	}
 	for _, msg := range req.Messages {
 		c := strings.TrimSpace(msg.Content)

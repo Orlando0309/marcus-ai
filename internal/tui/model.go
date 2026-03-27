@@ -27,10 +27,11 @@ import (
 )
 
 type transcriptItem struct {
-	Kind  string
-	Title string
-	Body  string
-	Meta  string
+	Kind     string
+	Title    string
+	Body     string
+	Meta     string
+	SubItems []transcriptItem // For nested content like task lists under thinking cards
 }
 
 type PlanStep struct {
@@ -69,11 +70,10 @@ func (f flowContextAssembler) Assemble(input string, sess *session.Session) flow
 	return f.toFlowSnapshot(f.delegate.Assemble(input, sess))
 }
 
-// focusComposer / focusTranscript / focusDiffPane — Tab cycles panes when wide enough.
+// focusComposer / focusTranscript — Tab cycles panes.
 const (
 	focusComposer = iota
 	focusTranscript
-	focusDiffPane
 )
 
 // Model is the Marcus TUI model (transcript + optional diff pane + composer).
@@ -90,8 +90,11 @@ type Model struct {
 	cfg               *config.Config
 	styles            Styles
 	viewport          viewport.Model
-	diffViewport      viewport.Model
 	textarea          textarea.Model
+
+	// Claude Code-style state
+	currentThinkingCard int // Index of the current thinking card in transcript
+	thinkingSubItems    []transcriptItem // Subtasks/tool calls under current thinking card
 	width             int
 	height            int
 	ready             bool
@@ -281,37 +284,35 @@ func New(cfg *config.Config) (*Model, error) {
 	memoryManager := memory.NewManager(baseDir, cfg.Memory.RecallLimit)
 	_ = memoryManager.EnsureStructure()
 
-	diffVP := viewport.New(40, 24)
-	diffVP.MouseWheelEnabled = true
 	mainVP := viewport.New(100, 24)
 	mainVP.MouseWheelEnabled = true
 
 	model := &Model{
-		provider:         prov,
-		providerRuntime:  provider.NewRuntime(prov, baseDir, cfg.ProviderCfg.CacheEnabled),
-		flowEngine:       flowEngine,
-		toolRunner:       toolRunner,
-		codeIndex:        codeIndex,
-		lspBroker:        lspBroker,
-		memoryManager:    memoryManager,
-		isolationManager: isolation.NewManager(baseDir, cfg.Isolation),
-		cfg:              cfg,
-		styles:           DefaultStyles(),
-		viewport:         mainVP,
-		diffViewport:     diffVP,
-		textarea:         ta,
-		focusPane:        focusComposer,
-		projectRoot:      baseDir,
-		ready:            true,
-		status:           "ready",
-		taskStore:        taskStore,
-		session:          sess,
-		sessionStore:     sessionStore,
-		contextAssembler: ctxpkg.NewAssembler(cfg, flowEngine, taskStore, memoryManager),
-		width:            100,
-		height:           30,
-		activityIndex:    -1,
-		taskBoardIndex:   -1,
+		provider:            prov,
+		providerRuntime:     provider.NewRuntime(prov, baseDir, cfg.ProviderCfg.CacheEnabled),
+		flowEngine:          flowEngine,
+		toolRunner:          toolRunner,
+		codeIndex:           codeIndex,
+		lspBroker:           lspBroker,
+		memoryManager:       memoryManager,
+		isolationManager:    isolation.NewManager(baseDir, cfg.Isolation),
+		cfg:                 cfg,
+		styles:              DefaultStyles(),
+		viewport:            mainVP,
+		textarea:            ta,
+		focusPane:           focusComposer,
+		projectRoot:         baseDir,
+		ready:               true,
+		status:              "ready",
+		taskStore:           taskStore,
+		session:             sess,
+		sessionStore:        sessionStore,
+		contextAssembler:    ctxpkg.NewAssembler(cfg, flowEngine, taskStore, memoryManager),
+		width:               100,
+		height:              30,
+		activityIndex:       -1,
+		taskBoardIndex:      -1,
+		currentThinkingCard: -1,
 	}
 
 	ctxAsm := model.contextAssembler
