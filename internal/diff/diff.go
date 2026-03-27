@@ -151,14 +151,11 @@ func validatePatchHeader(p *Patch) error {
 			newCount++
 		}
 	}
-	if oldCount != p.OriginalLength {
-		return fmt.Errorf("hunk @@ -%d,%d: old side has %d lines, expected %d",
-			p.OriginalLine, p.OriginalLength, oldCount, p.OriginalLength)
-	}
-	if newCount != p.NewLength {
-		return fmt.Errorf("hunk @@ +%d,%d: new side has %d lines, expected %d",
-			p.NewLine, p.NewLength, newCount, p.NewLength)
-	}
+	// Fix: Recalculate counts from actual hunk body instead of strict validation.
+	// LLMs often generate approximate line counts in diff headers.
+	// We trust the actual hunk content over the header counts.
+	p.OriginalLength = oldCount
+	p.NewLength = newCount
 	return nil
 }
 
@@ -385,6 +382,154 @@ func RenderDiff(diff string) string {
 	}
 
 	return rendered.String()
+}
+
+// StyledDiffLine represents a single line in a styled diff
+type StyledDiffLine struct {
+	Type       string // "+", "-", " " (context), "@" (hunk header), "h" (file header)
+	OldLineNum int    // 0 if not applicable (for additions)
+	NewLineNum int    // 0 if not applicable (for deletions)
+	Content    string
+}
+
+// StyledDiff renders a diff with line numbers and proper styling
+// Returns lines that can be styled with lipgloss
+func StyledDiff(diff string) ([]StyledDiffLine, error) {
+	patches, err := ParseUnifiedDiff(diff)
+	if err != nil {
+		// Fall back to raw rendering if parsing fails
+		return parseRawDiff(diff), nil
+	}
+
+	var lines []StyledDiffLine
+
+	for _, patch := range patches {
+		oldLine := patch.OriginalLine
+		newLine := patch.NewLine
+
+		// Add hunk header
+		lines = append(lines, StyledDiffLine{
+			Type:       "@",
+			OldLineNum: 0,
+			NewLineNum: 0,
+			Content:    fmt.Sprintf("@@ -%d,%d +%d,%d @@", patch.OriginalLine, patch.OriginalLength, patch.NewLine, patch.NewLength),
+		})
+
+		for _, pl := range patch.Lines {
+			switch pl.Type {
+			case "-":
+				lines = append(lines, StyledDiffLine{
+					Type:       "-",
+					OldLineNum: oldLine,
+					NewLineNum: 0,
+					Content:    pl.Content,
+				})
+				oldLine++
+			case "+":
+				lines = append(lines, StyledDiffLine{
+					Type:       "+",
+					OldLineNum: 0,
+					NewLineNum: newLine,
+					Content:    pl.Content,
+				})
+				newLine++
+			default: // context
+				lines = append(lines, StyledDiffLine{
+					Type:       " ",
+					OldLineNum: oldLine,
+					NewLineNum: newLine,
+					Content:    pl.Content,
+				})
+				oldLine++
+				newLine++
+			}
+		}
+	}
+
+	return lines, nil
+}
+
+func parseRawDiff(diff string) []StyledDiffLine {
+	var lines []StyledDiffLine
+	scanner := bufio.NewScanner(strings.NewReader(diff))
+
+	oldLine := 0
+	newLine := 0
+
+	for scanner.Scan() {
+		text := scanner.Text()
+
+		if strings.HasPrefix(text, "@@") {
+			lines = append(lines, StyledDiffLine{Type: "@", Content: text})
+			// Try to extract line numbers
+			if matches := hunkHeaderRE.FindStringSubmatch(text); matches != nil {
+				oldLine, _ = strconv.Atoi(matches[1])
+				newLine, _ = strconv.Atoi(matches[3])
+			}
+		} else if strings.HasPrefix(text, "-") && !strings.HasPrefix(text, "---") {
+			lines = append(lines, StyledDiffLine{
+				Type:       "-",
+				OldLineNum: oldLine,
+				Content:    text[1:],
+			})
+			oldLine++
+		} else if strings.HasPrefix(text, "+") && !strings.HasPrefix(text, "+++") {
+			lines = append(lines, StyledDiffLine{
+				Type:       "+",
+				NewLineNum: newLine,
+				Content:    text[1:],
+			})
+			newLine++
+		} else if strings.HasPrefix(text, " ") {
+			lines = append(lines, StyledDiffLine{
+				Type:       " ",
+				OldLineNum: oldLine,
+				NewLineNum: newLine,
+				Content:    text[1:],
+			})
+			oldLine++
+			newLine++
+		} else if strings.HasPrefix(text, "+++ ") || strings.HasPrefix(text, "--- ") {
+			lines = append(lines, StyledDiffLine{Type: "h", Content: text})
+		}
+	}
+
+	return lines
+}
+
+// DiffStats holds statistics about a diff
+type DiffStats struct {
+	FilePath   string
+	Added      int
+	Removed    int
+	TotalDelta int
+}
+
+// ParseDiffStats extracts statistics from a unified diff
+func ParseDiffStats(diff string) DiffStats {
+	stats := DiffStats{}
+	scanner := bufio.NewScanner(strings.NewReader(diff))
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Extract file path from +++ line (new file)
+		if strings.HasPrefix(line, "+++ ") {
+			path := strings.TrimPrefix(line, "+++ ")
+			path = strings.TrimPrefix(path, "b/")
+			stats.FilePath = path
+		}
+
+		// Count additions and deletions
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			stats.Added++
+		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			stats.Removed++
+		}
+	}
+
+	stats.TotalDelta = stats.Added - stats.Removed
+	return stats
 }
 
 // ConfirmApply prompts the user to confirm applying a diff

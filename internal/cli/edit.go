@@ -83,8 +83,12 @@ func NewEditCmd() *cobra.Command {
 				temperature = flow.Model.Temperature
 				maxTokens = flow.Model.MaxTokens
 			}
+			// Increase max_tokens for file editing to ensure complete response
+			if maxTokens < 8192 {
+				maxTokens = 8192
+			}
 
-			// Build prompt - ask for unified diff format
+			// Build prompt - ask for complete new file content (more reliable than diff format)
 			prompt := fmt.Sprintf(`You are an AI coding assistant. Edit the following file based on the instruction.
 
 File: %s
@@ -93,12 +97,8 @@ Instruction: %s
 Current content:
 %s
 
-Provide ONLY a unified diff showing the changes. Use this exact format:
-@@ -original_start,original_count +new_start,new_count @@
--line to remove
-+line to add
-
-Do not include any explanation text - just the diff.`, filePath, instruction, string(content))
+Return the COMPLETE new file content with all fixes applied.
+Do not include markdown code blocks, no explanations - just the raw code.`, filePath, instruction, string(content))
 
 			fmt.Printf("Sending request to %s (%s)...\n", prov.Name(), model)
 
@@ -115,72 +115,50 @@ Do not include any explanation text - just the diff.`, filePath, instruction, st
 
 			fmt.Printf("\nReceived response (%d tokens):\n", resp.Usage.TotalTokens)
 
-			// Try to parse as unified diff
-			patches, err := diff.ParseUnifiedDiff(resp.Text)
-			if err != nil {
-				fmt.Printf("Could not parse as unified diff: %v\n", err)
-				fmt.Println("Raw response:")
-				fmt.Println(resp.Text)
-				fmt.Println("\nFalling back to simple diff generation...")
+			// Debug: save raw response to file
+			os.WriteFile("debug_response.txt", []byte(resp.Text), 0644)
 
-				// Ask for the full new content
-				prompt2 := fmt.Sprintf(`Given the instruction "%s", provide the complete new content for the file.
-
-Current content:
-%s
-
-Return ONLY the new file content, no markdown, no explanations.`, instruction, string(content))
-
-				resp2, err := prov.Complete(ctx, prompt2, provider.CompletionOptions{
-					Model:       cfg.Model,
-					Temperature: cfg.Temperature,
-					MaxTokens:   cfg.MaxTokens,
-				})
-				if err != nil {
-					return fmt.Errorf("provider complete v2: %w", err)
+			// Clean up the response - strip markdown code blocks if present
+			newContent := strings.TrimSpace(resp.Text)
+			// Handle ```python or ``` at start
+			if strings.HasPrefix(newContent, "```") {
+				lines := strings.Split(newContent, "\n")
+				if len(lines) > 1 {
+					lines = lines[1:] // Remove first line (```python or ```)
 				}
-
-				// Generate diff
-				generatedDiff, err := diff.GenerateDiff(string(content), resp2.Text)
-				if err != nil {
-					return fmt.Errorf("generate diff: %w", err)
+				if len(lines) > 0 && strings.HasPrefix(lines[len(lines)-1], "```") {
+					lines = lines[:len(lines)-1] // Remove last line (```)
 				}
+				newContent = strings.Join(lines, "\n")
+			}
+			newContent = strings.TrimSpace(newContent)
 
-				// Render and confirm
-				fmt.Println("\nProposed changes:")
-				fmt.Println(diff.RenderDiff(generatedDiff))
-
-				reader := bufio.NewReader(os.Stdin)
-				fmt.Print("\nApply this edit? [y/N]: ")
-				answer, _ := reader.ReadString('\n')
-				answer = strings.TrimSpace(answer)
-
-				if answer == "y" || answer == "Y" {
-					if err := os.WriteFile(filePath, []byte(resp2.Text), 0644); err != nil {
-						return fmt.Errorf("write file: %w", err)
-					}
-					fmt.Println("✓ File updated")
-				} else {
-					fmt.Println("Edit cancelled")
-				}
-				return nil
+			// Debug: show first few chars of response
+			fmt.Printf("New content length: %d bytes\n", len(newContent))
+			if len(newContent) < 100 {
+				fmt.Printf("WARNING: Response seems too short, raw response saved to debug_response.txt\n")
 			}
 
-			// Render the diff
-			fmt.Println("\nProposed changes:")
-			fmt.Println(diff.RenderDiff(resp.Text))
+			// Generate diff from original to new content
+			generatedDiff, err := diff.GenerateDiff(string(content), newContent)
+			if err != nil {
+				return fmt.Errorf("generate diff: %w", err)
+			}
 
-			// Ask for confirmation
+			// Render and confirm
+			fmt.Println("\nProposed changes:")
+			fmt.Println(diff.RenderDiff(generatedDiff))
+
 			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("\nApply this diff? [y/N]: ")
+			fmt.Print("\nApply this edit? [y/N]: ")
 			answer, _ := reader.ReadString('\n')
 			answer = strings.TrimSpace(answer)
 
 			if answer == "y" || answer == "Y" {
-				if err := diff.ApplyPatchToFile(filePath, patches); err != nil {
-					return fmt.Errorf("apply patch: %w", err)
+				if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
+					return fmt.Errorf("write file: %w", err)
 				}
-				fmt.Println("✓ Diff applied successfully")
+				fmt.Println("✓ File updated")
 			} else {
 				fmt.Println("Edit cancelled")
 			}
