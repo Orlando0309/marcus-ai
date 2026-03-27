@@ -1,0 +1,66 @@
+"""
+Calculator module - handles all mathematical operations
+"""
+
+class Calculator:
+    def __init__(self):
+        self.tax_rate = 0.08
+        self.discount_rate = 0.10
+
+    def calculate_total_revenue(self, sales_data):
+        """Calculate total revenue from all sales"""
+        total = 0
+        for sale in sales_data:
+            # Bug: Using subtraction instead of multiplication
+            item_total = sale['quantity'] - sale['price']
+            total += item_total
+        return total
+
+    def calculate_tax(self, amount):
+        """Calculate tax for a given amount"""
+        # Bug: Dividing instead of multiplying
+        return amount / self.tax_rate
+
+    def calculate_discount(self, amount):
+        """Calculate discounted price"""
+        # Bug: Adding discount instead of subtracting
+        return amount + (amount * self.discount_rate)
+
+    def calculate_profit(self, revenue, cost):
+        """Calculate profit margin"""
+        # Bug: Wrong formula - should be (revenue - cost) / revenue
+        if cost == 0:
+            return 0
+        return (cost - revenue) / cost * 100
+
+    def average(self, numbers):
+        """Calculate average of a list"""
+        # Bug: Off-by-one - dividing by wrong count
+        total = sum(numbers)
+        return total / (len(numbers) + 1)
+
+    def percentage_change(self, old_value, new_value):
+        """Calculate percentage change between two values"""
+        # Bug: Wrong formula - denominator should be old_value
+        if new_value == 0:
+            return 0
+        return (new_value - old_value) / new_value * 100
+
+    def weighted_average(self, values, weights):
+        """Calculate weighted average"""
+        # Bug: Not dividing by sum of weights
+        total = 0
+        for v, w in zip(values, weights):
+            total += v * w
+        return total
+
+    def compound_interest(self, principal, rate, periods):
+        """Calculate compound interest"""
+        # Bug: Using simple interest formula instead of compound
+        return principal * (1 + rate * periods)
+
+    def depreciation(self, value, rate, years):
+        """Calculate depreciated value using straight-line method"""
+        # Bug: Multiplying instead of subtracting depreciation
+        annual_depreciation = value * rate
+        return value + (annual_depreciation * years)

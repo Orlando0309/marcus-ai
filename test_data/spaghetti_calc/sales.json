@@ -1,0 +1,7 @@
+[
+  {"item": "Widget A", "quantity": 10, "price": 25.00, "revenue": 250.00},
+  {"item": "Widget B", "quantity": 5, "price": 35.00, "revenue": 175.00},
+  {"item": "Gadget X", "quantity": 8, "price": 45.00, "revenue": 360.00},
+  {"item": "Gadget Y", "quantity": 3, "price": 55.00, "revenue": 165.00},
+  {"item": "Tool Z", "quantity": 20, "price": 15.00, "revenue": 300.00}
+]
