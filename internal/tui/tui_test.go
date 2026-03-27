@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,5 +79,45 @@ func TestFilterCompletionNoopActions(t *testing.T) {
 	}
 	if filtered[0].Type != "read_file" {
 		t.Fatalf("expected read_file to remain, got %s", filtered[0].Type)
+	}
+}
+
+func TestRecoveryPromptIgnoresFailedGitCommands(t *testing.T) {
+	var m Model
+	results := []tool.ActionResult{
+		{
+			Proposal: tool.ActionProposal{
+				Type:    "run_command",
+				Command: `git commit -m "Add comprehensive README.md with project documentation"`,
+			},
+			Output:  "error: pathspec 'comprehensive' did not match any file(s) known to git",
+			Success: false,
+		},
+	}
+
+	if prompt := m.recoveryPrompt(results); prompt != "" {
+		t.Fatalf("expected no recovery prompt for git command failure, got %q", prompt)
+	}
+}
+
+func TestRecoveryPromptIncludesFailedVerificationCommands(t *testing.T) {
+	var m Model
+	results := []tool.ActionResult{
+		{
+			Proposal: tool.ActionProposal{
+				Type:    "run_command",
+				Command: "go test ./...",
+			},
+			Output:  "FAIL\tgithub.com/marcus-ai/marcus/internal/tui [build failed]",
+			Success: false,
+		},
+	}
+
+	prompt := m.recoveryPrompt(results)
+	if prompt == "" {
+		t.Fatal("expected recovery prompt for failed verification command")
+	}
+	if !strings.Contains(prompt, "go test ./...") {
+		t.Fatalf("expected prompt to mention failed command, got %q", prompt)
 	}
 }

@@ -40,7 +40,7 @@ func resultsToPaths(results []tool.ActionResult) []string {
 func (m *Model) recoveryPrompt(results []tool.ActionResult) string {
 	var failures []string
 	for _, result := range results {
-		if result.Proposal.Type == "run_command" && !result.Success {
+		if shouldAutoRetryVerificationFailure(result) {
 			failures = append(failures, fmt.Sprintf("Verification failed for %s:\n%s", result.Proposal.Command, trimText(result.Output, 1200)))
 		}
 	}
@@ -48,6 +48,41 @@ func (m *Model) recoveryPrompt(results []tool.ActionResult) string {
 		return ""
 	}
 	return "The last verification step failed after applying changes.\nDiagnose the failure, inspect the relevant files, propose the smallest corrective edit, and include a follow-up verification command.\n\n" + strings.Join(failures, "\n\n")
+}
+
+func shouldAutoRetryVerificationFailure(result tool.ActionResult) bool {
+	if result.Proposal.Type != "run_command" || result.Success {
+		return false
+	}
+
+	reason := strings.ToLower(strings.TrimSpace(result.Proposal.Reason))
+	if strings.Contains(reason, "verification") || strings.Contains(reason, "re-verify") || strings.Contains(reason, "build/test") {
+		return true
+	}
+
+	command := strings.ToLower(strings.TrimSpace(result.Proposal.Command))
+	if command == "" || strings.HasPrefix(command, "git ") {
+		return false
+	}
+
+	verifyPrefixes := []string{
+		"go test", "go build", "go vet", "golangci-lint run",
+		"cargo build", "cargo test",
+		"npm run build", "npm test", "npm run test",
+		"pnpm build", "pnpm test", "pnpm run build", "pnpm run test",
+		"yarn build", "yarn test",
+		"ruff check", "ruff format", "python -m compileall",
+		"mvn compile", "mvn test",
+		"gradle build", "gradle test",
+		"ctest", "make build",
+	}
+	for _, prefix := range verifyPrefixes {
+		if command == prefix || strings.HasPrefix(command, prefix+" ") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (m *Model) contextMeta(snapshot ctxpkg.Snapshot) string {

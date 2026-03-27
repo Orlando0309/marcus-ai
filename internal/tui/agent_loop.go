@@ -526,11 +526,23 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 			}
 			iterationToolResults = append(iterationToolResults, fmt.Sprintf("Tool: %s\n%s", action.Label(), result.Output))
 			m.addItem("tool_result", "Result: "+action.Label(), trimText(result.Output, 1500), "auto")
-			m.session.AppendEvent("tool_result", "tool", action.Type, trimText(result.Output, 1500), "", "ok", map[string]string{"label": action.Label()})
+			status := "ok"
+			if !result.Success {
+				status = "failed"
+			}
+			m.session.AppendEvent("tool_result", "tool", action.Type, trimText(result.Output, 1500), "", status, map[string]string{"label": action.Label()})
 			ch <- agentStatusMsg{
 				body:  fmt.Sprintf("Completed: %s", action.Label()),
 				meta:  "tool-done",
 				phase: phase,
+			}
+			if action.Type == "run_command" && !result.Success {
+				ch <- agentStatusMsg{
+					body:  fmt.Sprintf("Command failed: %s", action.Label()),
+					meta:  "tool-error",
+					phase: phase,
+				}
+				break
 			}
 			switch action.Type {
 			case "write_file", "patch_file", "edit_file", "create_file":

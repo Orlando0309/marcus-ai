@@ -401,11 +401,16 @@ func (m *Model) renderStyledDiff(summary, diffText string, current, total int) s
 }
 
 func (m *Model) addItem(kind, title, body, meta string) {
+	m.addItemWithBadges(kind, title, body, meta, nil)
+}
+
+func (m *Model) addItemWithBadges(kind, title, body, meta string, badges []Badge) {
 	item := transcriptItem{
-		Kind:  kind,
-		Title: title,
-		Body:  body,
-		Meta:  meta,
+		Kind:   kind,
+		Title:  title,
+		Body:   body,
+		Meta:   meta,
+		Badges: badges,
 	}
 
 	// If we're in a thinking card, add as subitem instead

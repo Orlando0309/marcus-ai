@@ -21,7 +21,11 @@ import (
 	"github.com/marcus-ai/marcus/internal/lsp"
 	"github.com/marcus-ai/marcus/internal/memory"
 	"github.com/marcus-ai/marcus/internal/provider"
+	"github.com/marcus-ai/marcus/internal/scheduler"
 	"github.com/marcus-ai/marcus/internal/session"
+	"github.com/marcus-ai/marcus/internal/skill"
+	"github.com/marcus-ai/marcus/internal/skill/builtin"
+	"github.com/marcus-ai/marcus/internal/mcp"
 	"github.com/marcus-ai/marcus/internal/task"
 	"github.com/marcus-ai/marcus/internal/tool"
 )
@@ -32,6 +36,7 @@ type transcriptItem struct {
 	Body     string
 	Meta     string
 	SubItems []transcriptItem // For nested content like task lists under thinking cards
+	Badges   []Badge          // Visual indicators for success/error/etc
 }
 
 type PlanStep struct {
@@ -140,6 +145,16 @@ type Model struct {
 	// Plan display state
 	activePlan        *Plan
 	planDisplayIndex  int
+
+	// Skills system
+	skillRegistry *skill.Registry
+	skillDeps     skill.Dependencies
+
+	// Scheduler
+	scheduler *scheduler.Scheduler
+
+	// Badge system
+	badgeManager *BadgeManager
 }
 
 type assistantEnvelope struct {
@@ -252,6 +267,26 @@ func New(cfg *config.Config) (*Model, error) {
 	codeIndex := codeintel.NewIndex(baseDir)
 	_ = codeIndex.Build(context.Background())
 	lspBroker := lsp.NewBroker(cfg.LSP, baseDir)
+
+	// Load MCP configuration and initialize clients
+	mcpConfig, _ := mcp.LoadConfig(mcp.DefaultConfigPath())
+	var mcpTools []tool.Tool
+	if mcpConfig != nil {
+		ctx := context.Background()
+		clients, err := mcpConfig.DiscoverServers(ctx)
+		if err == nil {
+			for _, client := range clients {
+				if client.IsReady() {
+					tools, _ := client.ListTools(ctx)
+					for _, t := range tools {
+						adapter := mcp.NewMCPToolAdapter(client, t)
+						mcpTools = append(mcpTools, adapter)
+					}
+				}
+			}
+		}
+	}
+
 	toolRunner, err := tool.BuildRunner(tool.BuildOptions{
 		BaseDir:        baseDir,
 		Config:         cfg,
@@ -259,6 +294,7 @@ func New(cfg *config.Config) (*Model, error) {
 		CodeIndex:      codeIndex,
 		LSP:            lspBroker,
 		SubagentRunner: flow.NewSubagentRunner(flowEngine.FolderEngine(), cfg, baseDir),
+		ExtraTools:     mcpTools,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("tool runner: %w", err)
@@ -313,7 +349,11 @@ func New(cfg *config.Config) (*Model, error) {
 		activityIndex:       -1,
 		taskBoardIndex:      -1,
 		currentThinkingCard: -1,
+		badgeManager:        NewBadgeManager(),
 	}
+
+	// Initialize skills system
+	model.initSkills()
 
 	ctxAsm := model.contextAssembler
 	loopCtxAsm := flowContextAssembler{
@@ -373,6 +413,43 @@ func (m *Model) bootstrapTranscript() {
 			m.addItem(kind, title, turn.Content, "restored")
 		}
 	}
+}
+
+// initSkills initializes the skill registry and registers builtin skills.
+func (m *Model) initSkills() {
+	// Create registry
+	m.skillRegistry = skill.NewRegistry()
+
+	// Set up skill dependencies
+	m.skillDeps = skill.Dependencies{
+		Config:       m.cfg,
+		ToolRunner:   m.toolRunner,
+		SessionStore: m.sessionStore,
+		Session:      m.session,
+		Provider:     m.provider,
+		ProjectRoot:  m.projectRoot,
+	}
+
+	// Initialize scheduler
+	store := scheduler.NewStore(scheduler.DefaultStorePath())
+	_ = store.EnsureStructure()
+	executor := scheduler.NewExecutor(4)
+	m.scheduler = scheduler.NewScheduler(store, executor)
+
+	// Register builtin skills
+	m.skillRegistry.Register(builtin.NewHelpSkill(m.skillRegistry))
+	m.skillRegistry.Register(&builtin.ClearSkill{})
+	m.skillRegistry.Register(&builtin.StatusSkill{})
+	m.skillRegistry.Register(&builtin.ModelSkill{})
+	m.skillRegistry.Register(&builtin.CommitSkill{})
+	m.skillRegistry.Register(&builtin.NewSessionSkill{})
+	m.skillRegistry.Register(builtin.NewSkill()) // /new alias
+	m.skillRegistry.Register(builtin.NewUndoSkill(&m.undoStack, &m.undoMu))
+	m.skillRegistry.Register(&builtin.MCPSkill{})
+
+	// Register schedule/triggers skills with scheduler
+	m.skillRegistry.Register(&builtin.ScheduleSkill{Scheduler: m.scheduler})
+	m.skillRegistry.Register(&builtin.TriggersSkill{Scheduler: m.scheduler})
 }
 
 // Run starts the TUI application.
