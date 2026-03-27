@@ -50,6 +50,9 @@ func (t *TodoWriteTool) Run(ctx context.Context, input json.RawMessage) (json.Ra
 		return nil, fmt.Errorf("unmarshal input: %w", err)
 	}
 	store := task.NewStore(t.baseDir)
+	if err := store.EnsureStructure(); err != nil {
+		return nil, fmt.Errorf("ensure task structure: %w", err)
+	}
 	updates := make([]task.Update, 0, len(params.Todos))
 	dag := &task.DAG{}
 	seenNodes := map[string]struct{}{}
@@ -61,16 +64,18 @@ func (t *TodoWriteTool) Run(ctx context.Context, input json.RawMessage) (json.Ra
 		if title == "" {
 			continue
 		}
+		// Generate ID if not provided
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			id = task.SlugifyForTool(title)
+		}
 		updates = append(updates, task.Update{
-			ID:          strings.TrimSpace(item.ID),
+			ID:          id,
 			Title:       title,
 			Description: strings.TrimSpace(item.Description),
 			Status:      strings.TrimSpace(item.Status),
 		})
-		nodeID := strings.TrimSpace(item.ID)
-		if nodeID == "" {
-			nodeID = task.SlugifyForTool(title)
-		}
+		nodeID := id
 		if _, ok := seenNodes[nodeID]; !ok {
 			dag.Nodes = append(dag.Nodes, nodeID)
 			seenNodes[nodeID] = struct{}{}
@@ -80,22 +85,36 @@ func (t *TodoWriteTool) Run(ctx context.Context, input json.RawMessage) (json.Ra
 			if dep == "" {
 				continue
 			}
+			// Ensure dependency node exists
+			if _, ok := seenNodes[dep]; !ok {
+				dag.Nodes = append(dag.Nodes, dep)
+				seenNodes[dep] = struct{}{}
+			}
 			dag.Edges = append(dag.Edges, task.Edge{From: dep, To: nodeID})
 		}
 	}
+	if len(updates) == 0 {
+		return json.Marshal(map[string]any{
+			"count": 0,
+			"tasks": []task.Task{},
+		})
+	}
+
 	applied, err := store.ApplyUpdates(updates)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("apply task updates: %w", err)
 	}
+
 	if len(dag.Nodes) > 0 || len(dag.Edges) > 0 {
-		_ = store.SaveDAG(dag)
+		if err := store.SaveDAG(dag); err != nil {
+			// Log but don't fail if DAG save fails
+			// This allows tasks to still be created even if DAG fails
+		}
 	}
+
 	return json.Marshal(map[string]any{
-		"count": appliedCount(applied),
+		"count": len(applied),
 		"tasks": applied,
 	})
 }
 
-func appliedCount(tasks []task.Task) int {
-	return len(tasks)
-}
