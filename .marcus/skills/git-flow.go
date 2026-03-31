@@ -1,20 +1,44 @@
-package skills
+package main
 
 import (
 	"bytes"
-	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
-
-	"github.com/marcus-ai/marcus/internal/skill"
 )
 
-// GitFlowSkill handles intelligent git commit workflow
-type GitFlowSkill struct{}
+// SkillResult is returned by the skill after execution
+type SkillResult struct {
+	Message string `json:"message"`
+	Done    bool   `json:"done"`
+	Error   string `json:"error,omitempty"`
+}
 
-// Run executes the git-flow skill
-func (s *GitFlowSkill) Run(ctx context.Context, args []string, deps skill.Dependencies) (skill.Result, error) {
+func main() {
+	// Get args from environment (null-separated)
+	argsStr := os.Getenv("MARCUS_SKILL_ARGS")
+	var args []string
+	if argsStr != "" {
+		args = strings.Split(argsStr, "\x00")
+	}
+
+	// Get project root (current directory when skill runs)
+	projectRoot, _ := os.Getwd()
+
+	// Run the skill
+	result := run(args, projectRoot)
+
+	// Output result
+	fmt.Println(result.Message)
+
+	// Exit with error if failed
+	if result.Error != "" {
+		os.Exit(1)
+	}
+}
+
+func run(args []string, projectRoot string) SkillResult {
 	// Parse flags
 	var (
 		stageAll = false
@@ -34,61 +58,61 @@ func (s *GitFlowSkill) Run(ctx context.Context, args []string, deps skill.Depend
 	}
 
 	// Check if we're in a git repository
-	if !s.isGitRepo(ctx, deps.ProjectRoot) {
-		return skill.Result{
+	if !isGitRepo(projectRoot) {
+		return SkillResult{
 			Message: "Error: Not in a git repository",
 			Done:    true,
 			Error:   "not a git repository",
-		}, nil
+		}
 	}
 
 	// Check for merge conflicts
-	if conflicts, err := s.hasConflicts(ctx, deps.ProjectRoot); err == nil && conflicts {
-		return skill.Result{
+	if conflicts, err := hasConflicts(projectRoot); err == nil && conflicts {
+		return SkillResult{
 			Message: "Error: Merge conflicts detected. Resolve them before committing.",
 			Done:    true,
 			Error:   "merge conflicts",
-		}, nil
+		}
 	}
 
 	// Handle --amend
 	if amend {
-		return s.handleAmend(ctx, deps, dryRun)
+		return handleAmend(projectRoot, dryRun)
 	}
 
 	// Get current status
-	status, err := s.getGitStatus(ctx, deps.ProjectRoot)
+	status, err := getGitStatus(projectRoot)
 	if err != nil {
-		return skill.Result{
+		return SkillResult{
 			Message: fmt.Sprintf("Failed to get git status: %v", err),
 			Done:    true,
 			Error:   err.Error(),
-		}, nil
+		}
 	}
 
 	// Parse status
-	staged, unstaged, untracked := s.parseStatus(status)
+	staged, unstaged, untracked := parseStatus(status)
 
 	// If nothing to commit
 	if len(staged) == 0 && len(unstaged) == 0 && len(untracked) == 0 {
-		return skill.Result{
+		return SkillResult{
 			Message: "Nothing to commit - working tree clean",
 			Done:    true,
-		}, nil
+		}
 	}
 
 	// Stage all if requested
 	if stageAll {
-		if err := s.stageAll(ctx, deps.ProjectRoot); err != nil {
-			return skill.Result{
+		if err := stageAllChanges(projectRoot); err != nil {
+			return SkillResult{
 				Message: fmt.Sprintf("Failed to stage changes: %v", err),
 				Done:    true,
 				Error:   err.Error(),
-			}, nil
+			}
 		}
 		// Refresh staged list
-		status, _ = s.getGitStatus(ctx, deps.ProjectRoot)
-		staged, _, _ = s.parseStatus(status)
+		status, _ = getGitStatus(projectRoot)
+		staged, _, _ = parseStatus(status)
 	}
 
 	// Check if we have staged changes
@@ -98,24 +122,24 @@ func (s *GitFlowSkill) Run(ctx context.Context, args []string, deps skill.Depend
 		msg.WriteString(fmt.Sprintf("Unstaged changes: %d files\n", len(unstaged)))
 		msg.WriteString(fmt.Sprintf("Untracked files: %d files\n", len(untracked)))
 		msg.WriteString("\nUse /git-flow --all to stage and commit all changes")
-		return skill.Result{
+		return SkillResult{
 			Message: msg.String(),
 			Done:    true,
-		}, nil
+		}
 	}
 
 	// Get the diff of staged changes
-	diff, err := s.getStagedDiff(ctx, deps.ProjectRoot)
+	diff, err := getStagedDiff(projectRoot)
 	if err != nil {
-		return skill.Result{
+		return SkillResult{
 			Message: fmt.Sprintf("Failed to get diff: %v", err),
 			Done:    true,
 			Error:   err.Error(),
-		}, nil
+		}
 	}
 
 	// Generate commit message
-	commitMsg, summary := s.generateCommitMessage(diff, staged)
+	commitMsg, summary := generateCommitMessage(diff, staged)
 
 	// Handle dry run
 	if dryRun {
@@ -127,22 +151,22 @@ func (s *GitFlowSkill) Run(ctx context.Context, args []string, deps skill.Depend
 		for _, f := range staged {
 			msg.WriteString(fmt.Sprintf("  + %s\n", f))
 		}
-		return skill.Result{
+		return SkillResult{
 			Message: msg.String(),
 			Done:    true,
-		}, nil
+		}
 	}
 
 	// Execute the commit
-	cmd := exec.CommandContext(ctx, "git", "commit", "-m", commitMsg)
-	cmd.Dir = deps.ProjectRoot
+	cmd := exec.Command("git", "commit", "-m", commitMsg)
+	cmd.Dir = projectRoot
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return skill.Result{
+		return SkillResult{
 			Message: fmt.Sprintf("Failed to commit:\n%s\nError: %v", string(output), err),
 			Done:    true,
 			Error:   err.Error(),
-		}, nil
+		}
 	}
 
 	// Success message
@@ -153,59 +177,59 @@ func (s *GitFlowSkill) Run(ctx context.Context, args []string, deps skill.Depend
 	msg.WriteString(fmt.Sprintf("Files: %d\n\n", len(staged)))
 	msg.WriteString(strings.TrimSpace(string(output)))
 
-	return skill.Result{
+	return SkillResult{
 		Message: msg.String(),
 		Done:    true,
-	}, nil
+	}
 }
 
 // handleAmend handles commit amendment
-func (s *GitFlowSkill) handleAmend(ctx context.Context, deps skill.Dependencies, dryRun bool) (skill.Result, error) {
+func handleAmend(projectRoot string, dryRun bool) SkillResult {
 	// Get the last commit diff
-	diff, err := s.getLastCommitDiff(ctx, deps.ProjectRoot)
+	diff, err := getLastCommitDiff(projectRoot)
 	if err != nil {
-		return skill.Result{
+		return SkillResult{
 			Message: fmt.Sprintf("Failed to get last commit diff: %v", err),
 			Done:    true,
 			Error:   err.Error(),
-		}, nil
+		}
 	}
 
 	if dryRun {
-		return skill.Result{
+		return SkillResult{
 			Message: fmt.Sprintf("=== Dry Run - Amend Preview ===\n\nWould amend previous commit with:\n%s", diff),
 			Done:    true,
-		}, nil
+		}
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "commit", "--amend", "--no-edit")
-	cmd.Dir = deps.ProjectRoot
+	cmd := exec.Command("git", "commit", "--amend", "--no-edit")
+	cmd.Dir = projectRoot
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return skill.Result{
+		return SkillResult{
 			Message: fmt.Sprintf("Failed to amend commit:\n%s", string(output)),
 			Done:    true,
 			Error:   err.Error(),
-		}, nil
+		}
 	}
 
-	return skill.Result{
+	return SkillResult{
 		Message: fmt.Sprintf("Amended previous commit:\n%s", strings.TrimSpace(string(output))),
 		Done:    true,
-	}, nil
+	}
 }
 
 // isGitRepo checks if the directory is a git repository
-func (s *GitFlowSkill) isGitRepo(ctx context.Context, dir string) bool {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+func isGitRepo(dir string) bool {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
 	cmd.Dir = dir
 	err := cmd.Run()
 	return err == nil
 }
 
 // hasConflicts checks for merge conflicts
-func (s *GitFlowSkill) hasConflicts(ctx context.Context, dir string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "--diff-filter=U")
+func hasConflicts(dir string) (bool, error) {
+	cmd := exec.Command("git", "diff", "--name-only", "--diff-filter=U")
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
@@ -215,15 +239,15 @@ func (s *GitFlowSkill) hasConflicts(ctx context.Context, dir string) (bool, erro
 }
 
 // getGitStatus returns the git status porcelain output
-func (s *GitFlowSkill) getGitStatus(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+func getGitStatus(dir string) (string, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	return string(output), err
 }
 
 // parseStatus parses git status output into staged, unstaged, and untracked files
-func (s *GitFlowSkill) parseStatus(status string) (staged, unstaged, untracked []string) {
+func parseStatus(status string) (staged, unstaged, untracked []string) {
 	lines := strings.Split(status, "\n")
 	for _, line := range lines {
 		if len(line) < 3 {
@@ -251,16 +275,16 @@ func (s *GitFlowSkill) parseStatus(status string) (staged, unstaged, untracked [
 	return
 }
 
-// stageAll stages all changes
-func (s *GitFlowSkill) stageAll(ctx context.Context, dir string) error {
-	cmd := exec.CommandContext(ctx, "git", "add", "-A")
+// stageAllChanges stages all changes
+func stageAllChanges(dir string) error {
+	cmd := exec.Command("git", "add", "-A")
 	cmd.Dir = dir
 	return cmd.Run()
 }
 
 // getStagedDiff returns the diff of staged changes
-func (s *GitFlowSkill) getStagedDiff(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--no-color")
+func getStagedDiff(dir string) (string, error) {
+	cmd := exec.Command("git", "diff", "--cached", "--no-color")
 	cmd.Dir = dir
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -270,26 +294,26 @@ func (s *GitFlowSkill) getStagedDiff(ctx context.Context, dir string) (string, e
 }
 
 // getLastCommitDiff returns diff from the last commit
-func (s *GitFlowSkill) getLastCommitDiff(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "show", "--stat", "HEAD")
+func getLastCommitDiff(dir string) (string, error) {
+	cmd := exec.Command("git", "show", "--stat", "HEAD")
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	return string(output), err
 }
 
 // generateCommitMessage creates a clear, conventional commit message
-func (s *GitFlowSkill) generateCommitMessage(diff string, stagedFiles []string) (message, summary string) {
+func generateCommitMessage(diff string, stagedFiles []string) (message, summary string) {
 	// Analyze the diff
-	additions, deletions, fileChanges := s.analyzeDiff(diff)
+	additions, deletions, fileChanges := analyzeDiff(diff)
 
 	// Determine change type
-	changeType := s.determineChangeType(diff, additions, deletions)
+	changeType := determineChangeType(diff, additions, deletions)
 
 	// Get primary scope (directory or file type)
-	scope := s.determineScope(stagedFiles)
+	scope := determineScope(stagedFiles)
 
 	// Generate concise description
-	description := s.generateDescription(stagedFiles, fileChanges, changeType)
+	description := generateDescription(stagedFiles, fileChanges, changeType)
 
 	// Build the commit message (conventional commits format)
 	if scope != "" {
@@ -310,7 +334,7 @@ func (s *GitFlowSkill) generateCommitMessage(diff string, stagedFiles []string) 
 }
 
 // analyzeDiff extracts statistics from diff
-func (s *GitFlowSkill) analyzeDiff(diff string) (additions, deletions int, changes map[string]int) {
+func analyzeDiff(diff string) (additions, deletions int, changes map[string]int) {
 	changes = make(map[string]int)
 	lines := strings.Split(diff, "\n")
 	currentFile := ""
@@ -337,7 +361,7 @@ func (s *GitFlowSkill) analyzeDiff(diff string) (additions, deletions int, chang
 }
 
 // determineChangeType categorizes the change type
-func (s *GitFlowSkill) determineChangeType(diff string, additions, deletions int) string {
+func determineChangeType(diff string, additions, deletions int) string {
 	// Check for specific patterns
 	hasTests := strings.Contains(diff, "_test.go") || strings.Contains(diff, "_test.py") ||
 		strings.Contains(diff, ".test.") || strings.Contains(diff, "Test")
@@ -375,7 +399,7 @@ func (s *GitFlowSkill) determineChangeType(diff string, additions, deletions int
 }
 
 // determineScope extracts the primary scope from file paths
-func (s *GitFlowSkill) determineScope(files []string) string {
+func determineScope(files []string) string {
 	if len(files) == 0 {
 		return ""
 	}
@@ -428,7 +452,7 @@ func (s *GitFlowSkill) determineScope(files []string) string {
 }
 
 // generateDescription creates a human-readable description
-func (s *GitFlowSkill) generateDescription(files []string, changes map[string]int, changeType string) string {
+func generateDescription(files []string, changes map[string]int, changeType string) string {
 	if len(files) == 1 {
 		// Single file change - describe what happened
 		file := files[0]
