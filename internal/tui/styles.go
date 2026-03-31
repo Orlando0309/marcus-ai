@@ -281,6 +281,32 @@ func DefaultStyles() Styles {
 	}
 }
 
+// Badge returns the style for a badge type
+func (s Styles) Badge(t BadgeType) lipgloss.Style {
+	switch t {
+	case BadgeSuccess:
+		return lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#22c55e")).
+			Bold(true)
+	case BadgeError:
+		return lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#ef4444")).
+			Bold(true)
+	case BadgeWarning:
+		return lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#fbbf24")).
+			Bold(true)
+	case BadgeInfo:
+		return lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#60a5fa"))
+	case BadgeProgress:
+		return lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#a78bfa"))
+	default:
+		return lipgloss.NewStyle()
+	}
+}
+
 // RenderItem renders a transcript item as a card.
 func (s Styles) RenderItem(item transcriptItem) string {
 	switch item.Kind {
@@ -311,7 +337,16 @@ func (s Styles) RenderItem(item transcriptItem) string {
 		// Claude Code-style action card with file path and diff
 		return renderActionCard(s, item)
 	case "result":
-		return s.ResultCard.Render("  " + item.Title + renderBodyLimited(item.Body, 8, 500) + renderMetaInline(s, item.Meta))
+		// Render badges if present
+		var badgeStr string
+		if len(item.Badges) > 0 {
+			var badgeParts []string
+			for _, badge := range item.Badges {
+				badgeParts = append(badgeParts, RenderBadge(badge, s))
+			}
+			badgeStr = " " + strings.Join(badgeParts, " ")
+		}
+		return s.ResultCard.Render("  " + item.Title + badgeStr + renderBodyLimited(item.Body, 8, 500) + renderMetaInline(s, item.Meta))
 	case "error":
 		return s.ErrorCard.Render("! " + item.Title + renderBody(item.Body) + renderMetaInline(s, item.Meta))
 	case "plan":

@@ -36,6 +36,7 @@ type BuildOptions struct {
 	CodeIndex      *codeintel.Index
 	LSP            *lsp.Broker
 	SubagentRunner SubagentRunner
+	ExtraTools     []Tool // Additional tools to register (e.g., MCP tools)
 }
 
 func BuildRunner(opts BuildOptions) (*ToolRunner, error) {
@@ -171,6 +172,17 @@ func BuildRunner(opts BuildOptions) (*ToolRunner, error) {
 		if tool, ok := compositeRegistry.Get(name); ok {
 			runner.Register(tool)
 		}
+	}
+
+	// Register extra tools (e.g., MCP tools)
+	for _, t := range opts.ExtraTools {
+		runner.RegisterWithDefinition(t, Definition{
+			Name:        t.Name(),
+			Description: t.Description(),
+			Schema:      t.Schema(),
+			Source:      "mcp",
+			Safe:        false, // MCP tools require approval by default
+		})
 	}
 
 	return runner, nil

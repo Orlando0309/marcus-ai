@@ -19,6 +19,7 @@ import (
 	"github.com/marcus-ai/marcus/internal/codeintel"
 	"github.com/marcus-ai/marcus/internal/config"
 	"github.com/marcus-ai/marcus/internal/diff"
+	"github.com/marcus-ai/marcus/internal/file"
 	"github.com/marcus-ai/marcus/internal/safety"
 )
 
@@ -605,7 +606,10 @@ func (t *ReadFileTool) Run(ctx context.Context, input json.RawMessage) (json.Raw
 		return nil, fmt.Errorf("read file: %w", err)
 	}
 
-	result := map[string]interface{}{
+	// Track the mtime so we can detect external modifications
+	_ = file.Track(path)
+
+	result := map[string]any{
 		"path":    params.Path,
 		"content": string(content),
 		"size":    len(content),
@@ -769,6 +773,13 @@ func (t *WriteFileTool) Run(ctx context.Context, input json.RawMessage) (json.Ra
 		return nil, err
 	}
 
+	// Check that file hasn't been modified since we last read it
+	if !params.Append {
+		if err := file.Assert(path); err != nil {
+			return nil, fmt.Errorf("stale file (possible race condition): %w", err)
+		}
+	}
+
 	// Create parent directory if needed
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -788,6 +799,8 @@ func (t *WriteFileTool) Run(ctx context.Context, input json.RawMessage) (json.Ra
 		if err := os.WriteFile(path, []byte(params.Content), 0644); err != nil {
 			return nil, fmt.Errorf("write file: %w", err)
 		}
+		// Track the new mtime after successful write
+		_ = file.Track(path)
 	}
 
 	result := map[string]interface{}{
@@ -1289,7 +1302,11 @@ func (t *RunCommandTool) Run(ctx context.Context, input json.RawMessage) (json.R
 	// Build command
 	var cmd *exec.Cmd
 	if filepath.Separator == '\\' {
-		cmd = exec.CommandContext(ctx, "cmd", "/c", params.Command)
+		if directCmd, ok := buildDirectWindowsCommand(ctx, params.Command); ok {
+			cmd = directCmd
+		} else {
+			cmd = exec.CommandContext(ctx, "cmd", "/c", params.Command)
+		}
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", params.Command)
 	}
@@ -1337,8 +1354,87 @@ func normalizeCommandForShell(command string) string {
 		// executes through `cmd /c`, so the shell should receive plain quotes.
 		command = strings.ReplaceAll(command, `\"`, `"`)
 		command = strings.ReplaceAll(command, `\'`, `'`)
+		command = strings.ReplaceAll(command, "`\"", `"`)
+		command = unwrapWrappedCommand(command)
 	}
 	return command
+}
+
+func buildDirectWindowsCommand(ctx context.Context, command string) (*exec.Cmd, bool) {
+	if hasShellMetacharacters(command) {
+		return nil, false
+	}
+
+	args, err := splitCommandLine(command)
+	if err != nil || len(args) == 0 {
+		return nil, false
+	}
+	if !strings.EqualFold(args[0], "git") {
+		return nil, false
+	}
+
+	return exec.CommandContext(ctx, args[0], args[1:]...), true
+}
+
+func hasShellMetacharacters(command string) bool {
+	return strings.ContainsAny(command, "|&;<>\n\r")
+}
+
+func unwrapWrappedCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if len(command) < 2 {
+		return command
+	}
+	if (command[0] == '"' && command[len(command)-1] == '"') || (command[0] == '\'' && command[len(command)-1] == '\'') {
+		return strings.TrimSpace(command[1 : len(command)-1])
+	}
+	return command
+}
+
+func splitCommandLine(command string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	var quote rune
+	escaped := false
+
+	flush := func() {
+		if current.Len() == 0 {
+			return
+		}
+		args = append(args, current.String())
+		current.Reset()
+	}
+
+	for _, r := range command {
+		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+		case r == '\\' && quote != '\'':
+			escaped = true
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				current.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			quote = r
+		case r == ' ' || r == '\t':
+			flush()
+		default:
+			current.WriteRune(r)
+		}
+	}
+
+	if escaped {
+		current.WriteRune('\\')
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote in command")
+	}
+	flush()
+	return args, nil
 }
 
 func resolveToolPath(baseDir, path string) (string, error) {

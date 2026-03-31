@@ -310,6 +310,27 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 			if event.ToolCall != nil {
 				toolCallsSeen++
 				body := formatToolCallHuman(event.ToolCall.Name, event.ToolCall.Input)
+
+				// Check for doom loop
+				if m.cfg.Autonomy.DoomLoop.Enabled && m.doomDetector != nil {
+					result := m.doomDetector.Check(event.ToolCall.Name, event.ToolCall.Input)
+					if result.IsDoom {
+						m.addItem("system", "Doom Loop Detected", fmt.Sprintf("This tool call has been repeated %d times. Marcus is pausing to avoid an infinite loop.", result.RepeatCount), "doom-loop")
+						if m.cfg.Autonomy.DoomLoop.AskOnDetect {
+							m.clearAgentContinuation()
+							ch <- assistantResponseMsg{
+								envelope: assistantEnvelope{
+									Message: "I detected a potential doom loop (repeated identical tool calls). I need different instructions or context to proceed.",
+								},
+								raw:      lastRaw,
+								context:  currentSnapshot,
+								showItem: true,
+							}
+							return
+						}
+					}
+				}
+
 				m.addItem("tool_call", fmt.Sprintf("Tool #%d: %s", toolCallsSeen, event.ToolCall.Name), body, "provider-call")
 				if thinkingCardIndex >= 0 {
 					m.updateTranscriptItem(thinkingCardIndex, "thinking", "Marcus is thinking...", thinkingCardBody(charCount, toolCallsSeen), fmt.Sprintf("%d chars", charCount))
@@ -526,11 +547,23 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 			}
 			iterationToolResults = append(iterationToolResults, fmt.Sprintf("Tool: %s\n%s", action.Label(), result.Output))
 			m.addItem("tool_result", "Result: "+action.Label(), trimText(result.Output, 1500), "auto")
-			m.session.AppendEvent("tool_result", "tool", action.Type, trimText(result.Output, 1500), "", "ok", map[string]string{"label": action.Label()})
+			status := "ok"
+			if !result.Success {
+				status = "failed"
+			}
+			m.session.AppendEvent("tool_result", "tool", action.Type, trimText(result.Output, 1500), "", status, map[string]string{"label": action.Label()})
 			ch <- agentStatusMsg{
 				body:  fmt.Sprintf("Completed: %s", action.Label()),
 				meta:  "tool-done",
 				phase: phase,
+			}
+			if action.Type == "run_command" && !result.Success {
+				ch <- agentStatusMsg{
+					body:  fmt.Sprintf("Command failed: %s", action.Label()),
+					meta:  "tool-error",
+					phase: phase,
+				}
+				break
 			}
 			switch action.Type {
 			case "write_file", "patch_file", "edit_file", "create_file":

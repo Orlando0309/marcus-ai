@@ -1,0 +1,23 @@
+name: git-flow
+pattern: /git-flow
+description: Intelligent git workflow - commit changes with AI-generated clear messages
+args:
+  - "--all"
+  - "--dry-run"
+  - "-- amend"
+handler: skills/git-flow.go
+timeout: 60s
+help: |
+  Git Flow Skill - Intelligent commit workflow for Marcus
+
+  Usage:
+    /git-flow              - Commit staged changes with AI-generated message
+    /git-flow --all        - Stage all changes and commit
+    /git-flow --dry-run    - Preview commit message without committing
+    /git-flow --amend      - Amend previous commit with new message
+
+  Features:
+    - Analyzes staged/unstaged changes
+    - Generates conventional commit messages
+    - Shows diff summary before committing
+    - Handles edge cases (no changes, merge conflicts, etc.)

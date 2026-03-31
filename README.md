@@ -53,16 +53,27 @@ go build -o marcus.exe ./cmd/marcus
 Create `~/.marcus/config.toml`:
 
 ```toml
-[provider]
-name = "anthropic"
+provider = "anthropic"
 model = "claude-sonnet-4-5-20250929"
-api_key = "sk-ant-..."
 
 # Or use Ollama:
-# name = "ollama"
+# provider = "ollama"
 # model = "llama-3.1-70b"
-# host = "http://localhost:11434"
 ```
+
+Do not put API keys in `~/.marcus/config.toml` or `.marcus/marcus.toml`.
+
+For providers that need credentials, use one of these:
+
+```bash
+# Recommended: Marcus prompts once and stores the key securely
+./marcus.exe chat --model anthropic:claude-sonnet-4-5-20250929
+
+# Alternative: provide it via environment variable
+set ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Marcus stores prompted API keys in the OS credential store when available, or in `~/.marcus/credentials.enc` as encrypted data.
 
 ### Initialize Project
 
@@ -375,25 +386,24 @@ Synthesis:
 ### Global Config (`~/.marcus/config.toml`)
 
 ```toml
-[provider]
-name = "anthropic"
+provider = "anthropic"
 model = "claude-sonnet-4-5-20250929"
-
-[settings]
-theme = "dark"
-confirm_apply = true
+theme = "marcus-dark"
+temperature = 0.3
+max_tokens = 4096
 ```
+
+Secrets do not belong in config files. Keep API keys in environment variables or let Marcus prompt and store them securely.
 
 ### Project Config (`.marcus/marcus.toml`)
 
 ```toml
-[provider]
-name = "ollama"
+provider = "ollama"
 model = "llama-3.1-70b"
 
 [project]
 name = "my-app"
-language = "go"
+description = "Example Marcus project"
 
 # Embeddings configuration for semantic search
 [embeddings]
@@ -425,8 +435,8 @@ confidence_threshold = 0.7
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ANTHROPIC_API_KEY` | Anthropic API key | Required for Anthropic |
-| `OPENAI_API_KEY` | OpenAI API key | Required for OpenAI embeddings |
+| `ANTHROPIC_API_KEY` | Anthropic API key | Optional if you let Marcus store it securely on first prompt |
+| `OPENAI_API_KEY` | OpenAI API key | Required for OpenAI embeddings unless stored securely by Marcus |
 | `OLLAMA_HOST` | Ollama host | `http://localhost:11434` |
 | `MARCUS_LOG_LEVEL` | Log verbosity (debug, info, warn, error) | `info` |
 

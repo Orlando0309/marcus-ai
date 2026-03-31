@@ -15,6 +15,12 @@ import (
 )
 
 func (m *Model) Init() tea.Cmd {
+	// Start the scheduler in background
+	if m.scheduler != nil {
+		ctx := context.Background()
+		_ = m.scheduler.Start(ctx)
+	}
+
 	return textarea.Blink
 }
 
@@ -206,7 +212,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !result.Success {
 				meta = fmt.Sprintf("exit code %d", result.ExitCode)
 			}
-			m.addItem("result", result.Proposal.Label(), body, meta)
+			// Create badges for success/error
+			var badges []Badge
+			if result.Success {
+				badges = append(badges, Badge{Type: BadgeSuccess, Message: "Applied", ActionID: result.Proposal.Label()})
+			} else {
+				badges = append(badges, Badge{Type: BadgeError, Message: "Failed", ActionID: result.Proposal.Label()})
+			}
+			m.addItemWithBadges("result", result.Proposal.Label(), body, meta, badges)
 			m.session.AppendAction(result.Proposal.Label(), meta)
 		}
 		if paths := resultsToPaths(msg.results); len(paths) > 0 && m.codeIndex != nil && (msg.session == nil || msg.session.Mode == isolation.ModeInPlace) {
@@ -385,19 +398,24 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if content == "" {
 			return m, nil
 		}
-		if content == "/newsession" || content == "/new" {
-			return m.resetSession(), nil
-		}
-		if strings.EqualFold(content, "/undo") {
+
+		// Check for slash commands via skill registry
+		if skill, args, ok := m.skillRegistry.Parse(content); ok {
+			result, err := skill.Run(context.Background(), args, m.skillDeps)
+			if err != nil {
+				m.addItem("error", "Skill Error", err.Error(), "")
+			} else if result.Message != "" {
+				m.addItem("system", skill.Name(), result.Message, "")
+			}
 			m.textarea.SetValue("")
-			return m, m.cmdUndoPop()
+			if result.Done {
+				m.status = "ready"
+				return m, nil
+			}
+			// Not done - continue to AI with the message added to context
+			// (skill already added its message to the transcript)
 		}
-		if strings.EqualFold(content, "/help") {
-			m.textarea.SetValue("")
-			m.addItem("system", "Help", renderHelpText(), "")
-			m.status = "help"
-			return m, nil
-		}
+
 		m.textarea.SetValue("")
 		m.status = "thinking"
 		m.busy = true
