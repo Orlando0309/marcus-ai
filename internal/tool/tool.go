@@ -19,6 +19,7 @@ import (
 	"github.com/marcus-ai/marcus/internal/codeintel"
 	"github.com/marcus-ai/marcus/internal/config"
 	"github.com/marcus-ai/marcus/internal/diff"
+	"github.com/marcus-ai/marcus/internal/file"
 	"github.com/marcus-ai/marcus/internal/safety"
 )
 
@@ -605,7 +606,10 @@ func (t *ReadFileTool) Run(ctx context.Context, input json.RawMessage) (json.Raw
 		return nil, fmt.Errorf("read file: %w", err)
 	}
 
-	result := map[string]interface{}{
+	// Track the mtime so we can detect external modifications
+	_ = file.Track(path)
+
+	result := map[string]any{
 		"path":    params.Path,
 		"content": string(content),
 		"size":    len(content),
@@ -769,6 +773,13 @@ func (t *WriteFileTool) Run(ctx context.Context, input json.RawMessage) (json.Ra
 		return nil, err
 	}
 
+	// Check that file hasn't been modified since we last read it
+	if !params.Append {
+		if err := file.Assert(path); err != nil {
+			return nil, fmt.Errorf("stale file (possible race condition): %w", err)
+		}
+	}
+
 	// Create parent directory if needed
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -788,6 +799,8 @@ func (t *WriteFileTool) Run(ctx context.Context, input json.RawMessage) (json.Ra
 		if err := os.WriteFile(path, []byte(params.Content), 0644); err != nil {
 			return nil, fmt.Errorf("write file: %w", err)
 		}
+		// Track the new mtime after successful write
+		_ = file.Track(path)
 	}
 
 	result := map[string]interface{}{

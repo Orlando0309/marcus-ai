@@ -310,6 +310,27 @@ func (m *Model) runAgentLoopAsync(content string, snapshot ctxpkg.Snapshot, agen
 			if event.ToolCall != nil {
 				toolCallsSeen++
 				body := formatToolCallHuman(event.ToolCall.Name, event.ToolCall.Input)
+
+				// Check for doom loop
+				if m.cfg.Autonomy.DoomLoop.Enabled && m.doomDetector != nil {
+					result := m.doomDetector.Check(event.ToolCall.Name, event.ToolCall.Input)
+					if result.IsDoom {
+						m.addItem("system", "Doom Loop Detected", fmt.Sprintf("This tool call has been repeated %d times. Marcus is pausing to avoid an infinite loop.", result.RepeatCount), "doom-loop")
+						if m.cfg.Autonomy.DoomLoop.AskOnDetect {
+							m.clearAgentContinuation()
+							ch <- assistantResponseMsg{
+								envelope: assistantEnvelope{
+									Message: "I detected a potential doom loop (repeated identical tool calls). I need different instructions or context to proceed.",
+								},
+								raw:      lastRaw,
+								context:  currentSnapshot,
+								showItem: true,
+							}
+							return
+						}
+					}
+				}
+
 				m.addItem("tool_call", fmt.Sprintf("Tool #%d: %s", toolCallsSeen, event.ToolCall.Name), body, "provider-call")
 				if thinkingCardIndex >= 0 {
 					m.updateTranscriptItem(thinkingCardIndex, "thinking", "Marcus is thinking...", thinkingCardBody(charCount, toolCallsSeen), fmt.Sprintf("%d chars", charCount))

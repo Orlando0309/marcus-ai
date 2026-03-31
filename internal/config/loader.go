@@ -113,9 +113,17 @@ type LSPConfig struct {
 }
 
 type AutonomyConfig struct {
-	MaxIterations    int  `toml:"max_iterations"`
-	RetryBudget      int  `toml:"retry_budget"`
-	VerifyAfterApply bool `toml:"verify_after_apply"`
+	MaxIterations    int            `toml:"max_iterations"`
+	RetryBudget      int            `toml:"retry_budget"`
+	VerifyAfterApply bool           `toml:"verify_after_apply"`
+	DoomLoop         DoomLoopConfig `toml:"doom_loop"`
+}
+
+type DoomLoopConfig struct {
+	Enabled     bool `toml:"enabled"`
+	WindowSize  int  `toml:"window_size"`
+	Threshold   int  `toml:"threshold"`
+	AskOnDetect bool `toml:"ask_on_detect"` // If true, prompt user when doom detected; otherwise auto-block
 }
 
 type IsolationConfig struct {
@@ -176,6 +184,12 @@ func DefaultConfig() *Config {
 			MaxIterations:    100000,
 			RetryBudget:      2,
 			VerifyAfterApply: true,
+			DoomLoop: DoomLoopConfig{
+				Enabled:     true,
+				WindowSize:  20,
+				Threshold:   3,
+				AskOnDetect: true,
+			},
 		},
 		Isolation: IsolationConfig{
 			Enabled:         true,

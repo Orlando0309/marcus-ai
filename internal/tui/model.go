@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -155,6 +156,9 @@ type Model struct {
 
 	// Badge system
 	badgeManager *BadgeManager
+
+	// Doom loop detection
+	doomDetector *tool.DoomDetector
 }
 
 type assistantEnvelope struct {
@@ -350,6 +354,7 @@ func New(cfg *config.Config) (*Model, error) {
 		taskBoardIndex:      -1,
 		currentThinkingCard: -1,
 		badgeManager:        NewBadgeManager(),
+		doomDetector:        tool.NewDoomDetector(cfg.Autonomy.DoomLoop.WindowSize, cfg.Autonomy.DoomLoop.Threshold),
 	}
 
 	// Initialize skills system
@@ -450,6 +455,33 @@ func (m *Model) initSkills() {
 	// Register schedule/triggers skills with scheduler
 	m.skillRegistry.Register(&builtin.ScheduleSkill{Scheduler: m.scheduler})
 	m.skillRegistry.Register(&builtin.TriggersSkill{Scheduler: m.scheduler})
+
+	// Register create skill for scaffolding new components
+	m.skillRegistry.Register(&builtin.CreateSkill{})
+
+	// Discover and register YAML-defined skills from .marcus/skills/
+	m.discoverExternalSkills()
+}
+
+// discoverExternalSkills loads skill definitions from .marcus/skills/*.yaml
+func (m *Model) discoverExternalSkills() {
+	skillsDir := filepath.Join(m.projectRoot, ".marcus", "skills")
+	definitions, err := skill.DiscoverSkills(skillsDir)
+	if err != nil {
+		// Log error but don't fail - external skills are optional
+		return
+	}
+
+	for _, def := range definitions {
+		// Skip if pattern conflicts with builtin
+		if _, _, exists := m.skillRegistry.Parse(def.Pattern); exists {
+			continue
+		}
+
+		// Create external skill wrapper
+		externalSkill := skill.NewExternalSkill(def, m.projectRoot)
+		m.skillRegistry.Register(externalSkill)
+	}
 }
 
 // Run starts the TUI application.

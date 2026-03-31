@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/marcus-ai/marcus/internal/diff"
+	"github.com/marcus-ai/marcus/internal/file"
 )
 
 // PatchFileTool applies a unified diff to an existing file.
@@ -52,6 +53,12 @@ func (t *PatchFileTool) Run(ctx context.Context, input json.RawMessage) (json.Ra
 	if err != nil {
 		return nil, err
 	}
+
+	// Check that file hasn't been modified since we last read it
+	if err := file.Assert(path); err != nil {
+		return nil, fmt.Errorf("stale file (possible race condition): %w", err)
+	}
+
 	current, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
@@ -67,6 +74,8 @@ func (t *PatchFileTool) Run(ctx context.Context, input json.RawMessage) (json.Ra
 	if err := os.WriteFile(path, []byte(next), 0644); err != nil {
 		return nil, fmt.Errorf("write file: %w", err)
 	}
+	// Track the new mtime after successful write
+	_ = file.Track(path)
 	if t.list != nil {
 		t.list.invalidate()
 	}
@@ -120,6 +129,12 @@ func (t *EditFileTool) Run(ctx context.Context, input json.RawMessage) (json.Raw
 	if err != nil {
 		return nil, err
 	}
+
+	// Check that file hasn't been modified since we last read it
+	if err := file.Assert(path); err != nil {
+		return nil, fmt.Errorf("stale file (possible race condition): %w", err)
+	}
+
 	current, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
@@ -149,6 +164,8 @@ func (t *EditFileTool) Run(ctx context.Context, input json.RawMessage) (json.Raw
 	if err := os.WriteFile(path, []byte(next), 0644); err != nil {
 		return nil, fmt.Errorf("write file: %w", err)
 	}
+	// Track the new mtime after successful write
+	_ = file.Track(path)
 	if t.list != nil {
 		t.list.invalidate()
 	}
