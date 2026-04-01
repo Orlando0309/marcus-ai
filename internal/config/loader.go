@@ -89,9 +89,10 @@ type ManifestToolConfig struct {
 }
 
 type ProviderConfig struct {
-	CacheEnabled bool `toml:"cache_enabled"`
-	BatchEnabled bool `toml:"batch_enabled"`
-	MaxBatchSize int  `toml:"max_batch_size"`
+	CacheEnabled         bool `toml:"cache_enabled"`
+	BatchEnabled         bool `toml:"batch_enabled"`
+	MaxBatchSize         int  `toml:"max_batch_size"`
+	RateLimitPerMinute   int  `toml:"rate_limit_per_minute"` // Max API requests per minute (0 = unlimited)
 }
 
 type ReasoningConfig struct {
