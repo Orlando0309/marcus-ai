@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/marcus-ai/marcus/internal/flow"
 )
 
 // SwarmCoordinator orchestrates multi-agent teams for complex goals
@@ -211,6 +213,13 @@ func (c *SwarmCoordinator) AdvancePhase(swarmID string) error {
 	return nil
 }
 
+// UpdateRegistryEngine updates the loop engine in the registry
+func (c *SwarmCoordinator) UpdateRegistryEngine(eng *flow.LoopEngine) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.registry.SetLoopEngine(eng)
+}
+
 // TerminateSwarm terminates a swarm
 func (c *SwarmCoordinator) TerminateSwarm(id string, reason string) error {
 	c.mu.Lock()
@@ -238,26 +247,45 @@ func (c *SwarmCoordinator) TerminateSwarm(id string, reason string) error {
 // RecommendSwarmComposition analyzes a goal and recommends agent roles
 func (c *SwarmCoordinator) RecommendSwarmComposition(goal string) []string {
 	requiredRoles := []string{}
+	goalLower := strings.ToLower(goal)
 
-	if containsStr(goal, "design") || containsStr(goal, "architecture") || containsStr(goal, "interface") {
-		requiredRoles = append(requiredRoles, RoleArchitect)
+	// Complex projects need full team
+	if containsStr(goalLower, "api") || containsStr(goalLower, "service") || containsStr(goalLower, "platform") || containsStr(goalLower, "system") {
+		requiredRoles = append(requiredRoles, RoleArchitect, RoleCoder, RoleReviewer)
+	}
+
+	if containsStr(goal, "design") || containsStr(goal, "architecture") || containsStr(goal, "interface") || containsStr(goal, "structure") {
+		if !hasRole(requiredRoles, RoleArchitect) {
+			requiredRoles = append(requiredRoles, RoleArchitect)
+		}
 	}
 	if containsStr(goal, "plan") || containsStr(goal, "strategy") || containsStr(goal, "steps") {
-		requiredRoles = append(requiredRoles, RolePlanner)
+		if !hasRole(requiredRoles, RolePlanner) {
+			requiredRoles = append(requiredRoles, RolePlanner)
+		}
 	}
-	if containsStr(goal, "implement") || containsStr(goal, "write") || containsStr(goal, "create") || containsStr(goal, "add") {
-		requiredRoles = append(requiredRoles, RoleCoder)
+	if containsStr(goal, "implement") || containsStr(goal, "write") || containsStr(goal, "create") || containsStr(goal, "add") || containsStr(goal, "build") || containsStr(goal, "develop") {
+		if !hasRole(requiredRoles, RoleCoder) {
+			requiredRoles = append(requiredRoles, RoleCoder)
+		}
 	}
-	if containsStr(goal, "review") || containsStr(goal, "check") || containsStr(goal, "audit") {
-		requiredRoles = append(requiredRoles, RoleReviewer)
+	if containsStr(goal, "review") || containsStr(goal, "check") || containsStr(goal, "audit") || containsStr(goal, "quality") || containsStr(goal, "test") {
+		if !hasRole(requiredRoles, RoleReviewer) {
+			requiredRoles = append(requiredRoles, RoleReviewer)
+		}
 	}
 	if containsStr(goal, "debug") || containsStr(goal, "fix") || containsStr(goal, "error") || containsStr(goal, "bug") {
-		requiredRoles = append(requiredRoles, RoleDebugger)
+		if !hasRole(requiredRoles, RoleDebugger) {
+			requiredRoles = append(requiredRoles, RoleDebugger)
+		}
 	}
-	if containsStr(goal, "explore") || containsStr(goal, "discover") || containsStr(goal, "understand") {
-		requiredRoles = append(requiredRoles, RoleExplorer)
+	if containsStr(goal, "explore") || containsStr(goal, "discover") || containsStr(goal, "understand") || containsStr(goal, "analyze") {
+		if !hasRole(requiredRoles, RoleExplorer) {
+			requiredRoles = append(requiredRoles, RoleExplorer)
+		}
 	}
 
+	// Default team for complex tasks
 	if len(requiredRoles) == 0 {
 		requiredRoles = []string{RoleExplorer, RoleCoder, RoleReviewer}
 	}
@@ -275,6 +303,15 @@ func (c *SwarmCoordinator) RecommendSwarmComposition(goal string) []string {
 	})
 
 	return requiredRoles
+}
+
+func hasRole(roles []string, role string) bool {
+	for _, r := range roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
 }
 
 func getRoleCapabilities(role string) []string {

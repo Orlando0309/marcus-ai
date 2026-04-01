@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/marcus-ai/marcus/internal/agent"
@@ -82,9 +83,9 @@ func NewEnhancedLoopEngine(
 	protocol := agent.NewProtocol(100)
 	blackboard := agent.NewBlackboard(500)
 
-	// Create swarm coordinator
+	// Create swarm coordinator (use baseEngine parameter, will be properly wired by caller)
 	swarmCoord := agent.NewSwarmCoordinator(
-		agent.NewInMemoryAgentRegistry(folder, cfg, dataDir),
+		agent.NewInMemoryAgentRegistry(folder, cfg, dataDir, baseEngine),
 		protocol,
 		blackboard,
 		enhancedCfg.MaxSwarms,
@@ -178,7 +179,7 @@ func (e *EnhancedLoopEngine) Run(ctx context.Context, goal, taskID string, maxIt
 	}
 
 	// Check if this is a complex goal that needs a swarm
-	if e.config.EnableSwarm && e.isComplexGoal(goal) {
+	if e.config.EnableSwarm && e.IsComplexGoal(goal) {
 		return e.runSwarm(ctx, goal, taskID)
 	}
 
@@ -389,23 +390,40 @@ func (e *EnhancedLoopEngine) estimateAmbiguity(goal string) float64 {
 	return min(ambiguity, 1.0)
 }
 
-// isComplexGoal determines if a goal requires swarm execution
-func (e *EnhancedLoopEngine) isComplexGoal(goal string) bool {
+// IsComplexGoal determines if a goal requires swarm execution
+func (e *EnhancedLoopEngine) IsComplexGoal(goal string) bool {
+	goalLower := strings.ToLower(goal)
+
 	// Check for multi-step indicators
 	complexIndicators := []string{
-		"implement feature",
-		"add support for",
-		"create new",
-		"design and implement",
-		"build a",
+		"implement",
+		"create",
+		"build",
+		"design",
 		"set up",
 		"integrate",
+		"production-ready",
+		"rest api",
+		"full-stack",
+		"end-to-end",
+		"microservice",
+		"platform",
 	}
 
 	for _, indicator := range complexIndicators {
-		if contains(goal, indicator) {
+		if strings.Contains(goalLower, indicator) {
 			return true
 		}
+	}
+
+	// Check for multiple numbered requirements (indicates complex multi-part task)
+	if strings.Count(goal, "\n") > 5 && strings.Count(goal, ".") > 3 {
+		return true
+	}
+
+	// Long detailed goals are likely complex
+	if len(goal) > 300 {
+		return true
 	}
 
 	return false
@@ -434,6 +452,11 @@ func (e *EnhancedLoopEngine) GetCapabilityRegistry() *conscience.Registry {
 // GetConfidenceScorer returns the confidence scorer
 func (e *EnhancedLoopEngine) GetConfidenceScorer() *conscience.Scorer {
 	return e.confidenceScorer
+}
+
+// SetBaseEngine sets the base loop engine (for wiring dependencies)
+func (e *EnhancedLoopEngine) SetBaseEngine(eng *flow.LoopEngine) {
+	e.baseEngine = eng
 }
 
 // GetTriggerEngine returns the trigger engine
