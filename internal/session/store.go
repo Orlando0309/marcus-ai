@@ -96,11 +96,11 @@ func (s *Store) Save(sess *Session) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(s.root, "latest.json"), data, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(s.root, "latest.json"), data, 0600); err != nil {
 		return err
 	}
 	archive := filepath.Join(s.root, sess.ID+".json")
-	return os.WriteFile(archive, data, 0644)
+	return os.WriteFile(archive, data, 0600)
 }
 
 // AppendTurn records a turn and trims history to the provided limit.

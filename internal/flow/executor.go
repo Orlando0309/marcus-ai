@@ -12,6 +12,7 @@ import (
 
 	"github.com/marcus-ai/marcus/internal/codeintel"
 	"github.com/marcus-ai/marcus/internal/config"
+	diffpkg "github.com/marcus-ai/marcus/internal/diff"
 	"github.com/marcus-ai/marcus/internal/folder"
 	"github.com/marcus-ai/marcus/internal/lsp"
 	"github.com/marcus-ai/marcus/internal/provider"
@@ -143,7 +144,14 @@ func (fe *FlowExecutor) executeBlocking(ctx context.Context, prov provider.Provi
 	if fe.notify != nil {
 		fe.notify(fmt.Sprintf("Calling %s (%s)...", prov.Name(), opts.Model))
 	}
-	runtime := provider.NewRuntime(prov, fe.baseDir, fe.cfg != nil && fe.cfg.ProviderCfg.CacheEnabled)
+	runtime := provider.NewRuntimeWithConfig(prov, fe.baseDir, fe.cfg != nil && fe.cfg.ProviderCfg.CacheEnabled, provider.RuntimeConfig{
+		MaxRequestsPerMinute: func() int {
+			if fe.cfg != nil {
+				return fe.cfg.ProviderCfg.RateLimitPerMinute
+			}
+			return 0
+		}(),
+	})
 	resp, err := runtime.Complete(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("provider complete: %w", err)
@@ -380,59 +388,59 @@ func formatToolOutput(toolName string, raw json.RawMessage, err error) string {
 	return string(varpretty)
 }
 
-// ApplyDiff applies a unified diff to a file
+// ApplyDiff applies a unified diff to a file using a secure parser.
 func ApplyDiff(filePath, diff string, baseDir string) error {
-	// Parse the diff and apply changes
-	// This is a simplified implementation - production would use a proper diff parser
+	// Validate file path
+	cleanPath := filePath
+	if !filepath.IsAbs(filePath) && baseDir != "" {
+		cleanPath = filepath.Join(baseDir, filePath)
+	}
 
-	lines := strings.Split(diff, "\n")
-	var originalLines, newLines []string
-
-	inHunk := false
-	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, "@@"):
-			inHunk = true
-		case strings.HasPrefix(line, "-"):
-			if inHunk {
-				originalLines = append(originalLines, line[1:])
-			}
-		case strings.HasPrefix(line, "+"):
-			if inHunk {
-				newLines = append(newLines, line[1:])
-			}
-		case strings.HasPrefix(line, " "):
-			// Context line - keep as is
+	// Ensure the path is within baseDir if provided
+	if baseDir != "" {
+		absPath, err := filepath.Abs(cleanPath)
+		if err != nil {
+			return fmt.Errorf("invalid path: %w", err)
+		}
+		absBase, err := filepath.Abs(baseDir)
+		if err != nil {
+			return fmt.Errorf("invalid base dir: %w", err)
+		}
+		if !strings.HasPrefix(absPath, absBase) {
+			return fmt.Errorf("path %q is outside base directory", filePath)
 		}
 	}
 
 	// Read original file
-	content, err := os.ReadFile(filePath)
+	originalContent, err := os.ReadFile(cleanPath)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
 	}
 
-	// Simple replacement strategy - replace first occurrence of each original line
-	originalContent := string(content)
-	for i, orig := range originalLines {
-		if i < len(newLines) {
-			originalContent = strings.Replace(originalContent, orig, newLines[i], 1)
-		}
+	// Parse the diff
+	patches, err := diffpkg.ParseUnifiedDiff(diff)
+	if err != nil {
+		return fmt.Errorf("parse diff: %w", err)
 	}
 
-	// Write back
-	path := filePath
-	if !filepath.IsAbs(path) && baseDir != "" {
-		path = filepath.Join(baseDir, filePath)
+	if len(patches) == 0 {
+		return nil // No hunks to apply
+	}
+
+	// Apply patches with context validation
+	result, err := diffpkg.ApplyPatch(string(originalContent), patches)
+	if err != nil {
+		return fmt.Errorf("apply patch: %w", err)
 	}
 
 	// Create parent directory if needed
-	dir := filepath.Dir(path)
+	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
 	}
 
-	return os.WriteFile(path, []byte(originalContent), 0644)
+	// Write with restricted permissions
+	return os.WriteFile(cleanPath, []byte(result), 0644)
 }
 
 // RunShellTool executes a shell-based tool from a folder

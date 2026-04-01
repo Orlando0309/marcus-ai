@@ -39,8 +39,53 @@ func NewTemplateEngine() *TemplateEngine {
 // TemplateData holds the data for template rendering
 type TemplateData map[string]interface{}
 
-// Render parses and renders a template string
+// sanitizeValue recursively sanitizes template data values to prevent injection.
+func sanitizeValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case string:
+		// Remove potential template injection markers
+		// Block nested template syntax and shell injection patterns
+		s := val
+		// Block nested template delimiters
+		if strings.Contains(s, "{{") || strings.Contains(s, "}}") {
+			return "[BLOCKED: nested template syntax]"
+		}
+		// Block shell command substitution patterns
+		if strings.Contains(s, "$(") || strings.Contains(s, "`") {
+			return "[BLOCKED: command substitution]"
+		}
+		return s
+	case map[string]interface{}:
+		clean := make(map[string]interface{})
+		for k, v := range val {
+			clean[k] = sanitizeValue(v)
+		}
+		return clean
+	case []interface{}:
+		clean := make([]interface{}, len(val))
+		for i, v := range val {
+			clean[i] = sanitizeValue(v)
+		}
+		return clean
+	default:
+		return v
+	}
+}
+
+// Sanitize returns a copy of TemplateData with all values sanitized for safe template rendering.
+func (td TemplateData) Sanitize() TemplateData {
+	clean := make(TemplateData)
+	for k, v := range td {
+		clean[k] = sanitizeValue(v)
+	}
+	return clean
+}
+
+// Render parses and renders a template string with sanitized data.
 func (te *TemplateEngine) Render(templateStr string, data TemplateData) (string, error) {
+	// Sanitize input data to prevent template injection
+	safeData := data.Sanitize()
+
 	// Convert Jinja2-style {{.var}} to Go template {{.var}}
 	// Go's text/template already supports {{.var}} syntax
 	tmpl, err := template.New("flow").Option("missingkey=zero").Funcs(te.funcMap).Parse(templateStr)
@@ -49,7 +94,7 @@ func (te *TemplateEngine) Render(templateStr string, data TemplateData) (string,
 	}
 
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	if err := tmpl.Execute(&buf, safeData); err != nil {
 		return "", fmt.Errorf("execute template: %w", err)
 	}
 
