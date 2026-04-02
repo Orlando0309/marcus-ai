@@ -510,11 +510,16 @@ type stepEnvelope struct {
 func (le *LoopEngine) buildSystemPrompt(goal string) string {
 	var parts []string
 
+	// Base Marcus instructions (always needed for proper tool use and JSON response)
+	marcosBase := `You are Marcus, a terminal-native coding assistant. Work methodically: read the project map and existing context first, identify the one most relevant file or subsystem, and prefer a targeted read/search over broad repository scans. Follow the current pattern, make the smallest safe change, verify the result, and capture durable repo facts in the project map when they will help future tasks. Return JSON with "message", "actions", and "tasks" fields. Keep "message" human-readable and concise. Mark tasks active when implementing, done when complete, blocked when stuck. IMPORTANT: Use todo_write to track all tasks, especially for multi-step goals.`
+
 	// Use custom system prompt if set (e.g., for agent roles)
 	if le.customSystemPrompt != "" {
 		parts = append(parts, le.customSystemPrompt)
+		// Append Marcus base instructions so agents know about todo_write and JSON format
+		parts = append(parts, "\n\n---\n\n"+marcosBase)
 	} else {
-		parts = append(parts, `You are Marcus, a terminal-native coding assistant. Work methodically: read the project map and existing context first, identify the one most relevant file or subsystem, and prefer a targeted read/search over broad repository scans. Follow the current pattern, make the smallest safe change, verify the result, and capture durable repo facts in the project map when they will help future tasks. Return JSON with "message", "actions", and "tasks" fields. Keep "message" human-readable and concise. Mark tasks active when implementing, done when complete, blocked when stuck.`)
+		parts = append(parts, marcosBase)
 	}
 
 	if goal != "" {
