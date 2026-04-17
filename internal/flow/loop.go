@@ -289,6 +289,18 @@ func (le *LoopEngine) Run(ctx context.Context, goal, taskID string, maxIteration
 		// Parse envelope to extract actions and task updates
 		envelope := le.parseEnvelope(modelText)
 
+		// Convert envelope.Actions to toolCalls for execution
+		if len(envelope.Actions) > 0 && len(toolCalls) == 0 {
+			for _, action := range envelope.Actions {
+				inputJSON, _ := json.Marshal(action.Input)
+				tc := provider.ToolCall{
+					Name:  action.Type,
+					Input: inputJSON,
+				}
+				toolCalls = append(toolCalls, tc)
+			}
+		}
+
 		// Log the decision
 		var actionNames []string
 		for _, a := range envelope.Actions {
@@ -317,7 +329,7 @@ func (le *LoopEngine) Run(ctx context.Context, goal, taskID string, maxIteration
 		}
 
 		// Check if model signaled done or blocked
-		if state.TaskStatus == task.StatusDone || state.TaskStatus == task.StatusBlocked {
+		if (state.TaskStatus == task.StatusDone || state.TaskStatus == task.StatusBlocked) && len(toolCalls) == 0 {
 			state.Done = state.TaskStatus == task.StatusDone
 			state.Blocked = state.TaskStatus == task.StatusBlocked
 			state.FinishReason = state.TaskStatus
@@ -504,14 +516,28 @@ func (le *LoopEngine) BuildInitialMessages(goal string, sess *session.Session) (
 
 type stepEnvelope struct {
 	Actions []tool.ActionProposal `json:"actions"`
-	Tasks   []task.Update         `json:"tasks"`
+	Tasks   []task.Update        `json:"tasks"`
+	rawActs []map[string]any     `json:"-"`
 }
 
 func (le *LoopEngine) buildSystemPrompt(goal string) string {
 	var parts []string
 
 	// Base Marcus instructions (always needed for proper tool use and JSON response)
-	marcosBase := `You are Marcus, a terminal-native coding assistant. Work methodically: read the project map and existing context first, identify the one most relevant file or subsystem, and prefer a targeted read/search over broad repository scans. Follow the current pattern, make the smallest safe change, verify the result, and capture durable repo facts in the project map when they will help future tasks. Return JSON with "message", "actions", and "tasks" fields. Keep "message" human-readable and concise. Mark tasks active when implementing, done when complete, blocked when stuck. IMPORTANT: Use todo_write to track all tasks, especially for multi-step goals.`
+	marcosBase := `You are Marcus, a terminal-native coding assistant. You MUST use tools to accomplish goals - NEVER just describe what should be done, actually DO it.
+
+CRITICAL: When given a goal that requires creating files (like "create a README" or "build a project"), you MUST:
+1. Use write_file tool to create the actual files
+2. Use todo_write to track tasks for multi-step goals
+
+Return JSON with this exact structure:
+{
+  "message": "brief description of what you did",
+  "actions": [{"type": "tool_name", "input": {"arg1": "value1"}}],
+  "tasks": [{"id": "task1", "content": "task description", "status": "active"}]
+}
+
+Use "type" for tool name and "input" for tool arguments. Mark tasks active/done/blocked.`
 
 	// Use custom system prompt if set (e.g., for agent roles)
 	if le.customSystemPrompt != "" {
@@ -642,6 +668,29 @@ func (le *LoopEngine) parseEnvelope(text string) stepEnvelope {
 	if start := strings.Index(text, "{"); start != -1 {
 		if end := strings.LastIndex(text, "}"); end > start {
 			if err := json.Unmarshal([]byte(text[start:end+1]), &env); err == nil {
+				if len(env.Actions) == 0 && len(env.rawActs) > 0 {
+					for _, raw := range env.rawActs {
+						proposal := tool.ActionProposal{}
+						if toolName, ok := raw["tool"].(string); ok {
+							proposal.Type = toolName
+						}
+						if args, ok := raw["args"].(map[string]any); ok {
+							proposal.Input = args
+							if path, ok := args["path"].(string); ok {
+								proposal.Path = path
+							}
+							if content, ok := args["content"].(string); ok {
+								proposal.Content = content
+							}
+							if command, ok := args["command"].(string); ok {
+								proposal.Command = command
+							}
+						}
+						if len(proposal.Type) > 0 {
+							env.Actions = append(env.Actions, proposal)
+						}
+					}
+				}
 				return env
 			}
 		}

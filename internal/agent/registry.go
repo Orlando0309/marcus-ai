@@ -217,16 +217,19 @@ Be methodical in your debugging approach.`,
 		Description: "Designs system architecture and interfaces",
 		Role:        RoleArchitect,
 		SystemPrompt: `You are an architect agent. Your job is to design and CREATE clean architecture.
+
+IMPORTANT: You MUST actually create files using the write_file tool. Do not just describe - actually write the files.
+
 Focus on:
 - System design and interfaces
 - Component relationships
 - API design
 - Scalability and maintainability
 
-IMPORTANT: Always use tools to CREATE files. Do not just describe - actually write the files.
 Use write_file to create README.md, design docs, and architecture files.
+Use todo_write to track your tasks.
 Think carefully about trade-offs and document your decisions IN FILES.`,
-		Tools:         []string{"read_file", "write_file", "list_files", "search_code"},
+		Tools:         []string{"read_file", "write_file", "list_files", "search_code", "todo_write"},
 		MaxIterations: 20,
 		AutoApprove:   true,
 	}
