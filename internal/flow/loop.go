@@ -75,18 +75,19 @@ type ContextAssembler interface {
 // LoopEngine is a stateful, goal-aware execution engine that iteratively
 // calls the model with tool results fed back as conversation messages.
 type LoopEngine struct {
-	engine        *Engine
-	executor      *FlowExecutor
-	taskStore     *task.Store
-	memory        *memory.Manager
-	contextAsm    ContextAssembler
-	toolRunner    *tool.ToolRunner
-	provider      *provider.Runtime
-	cfg           *config.Config
-	baseDir       string
-	goalMu        sync.Mutex
-	goalStack     []string
-	selfCorrection *SelfCorrectionEngine
+	engine           *Engine
+	executor         *FlowExecutor
+	taskStore        *task.Store
+	memory           *memory.Manager
+	contextAsm       ContextAssembler
+	toolRunner       *tool.ToolRunner
+	provider         *provider.Runtime
+	cfg              *config.Config
+	baseDir          string
+	goalMu           sync.Mutex
+	goalStack        []string
+	selfCorrection   *SelfCorrectionEngine
+	customSystemPrompt string  // Optional custom system prompt (e.g., for agent roles)
 }
 
 // LoopState carries the full state of one run or one step.
@@ -149,6 +150,16 @@ func NewLoopEngine(
 // EnableSelfCorrection enables the self-correction system
 func (le *LoopEngine) EnableSelfCorrection(opts CorrectionOptions) {
 	le.selfCorrection = NewSelfCorrectionEngine(opts)
+}
+
+// SetSystemPrompt sets a custom system prompt (e.g., for agent roles)
+func (le *LoopEngine) SetSystemPrompt(prompt string) {
+	le.customSystemPrompt = prompt
+}
+
+// GetSystemPrompt returns the current custom system prompt
+func (le *LoopEngine) GetSystemPrompt() string {
+	return le.customSystemPrompt
 }
 
 // SetSelfCorrectionProvider sets the LLM provider for self-correction
@@ -269,8 +280,26 @@ func (le *LoopEngine) Run(ctx context.Context, goal, taskID string, maxIteration
 		modelText := resp.Text
 		messages = append(messages, provider.Message{Role: "assistant", Content: modelText})
 
+		// If no tool calls from provider, try to parse XML tool calls from text
+		toolCalls := resp.ToolCalls
+		if len(toolCalls) == 0 {
+			toolCalls = le.parseXMLToolCalls(modelText)
+		}
+
 		// Parse envelope to extract actions and task updates
 		envelope := le.parseEnvelope(modelText)
+
+		// Convert envelope.Actions to toolCalls for execution
+		if len(envelope.Actions) > 0 && len(toolCalls) == 0 {
+			for _, action := range envelope.Actions {
+				inputJSON, _ := json.Marshal(action.Input)
+				tc := provider.ToolCall{
+					Name:  action.Type,
+					Input: inputJSON,
+				}
+				toolCalls = append(toolCalls, tc)
+			}
+		}
 
 		// Log the decision
 		var actionNames []string
@@ -300,22 +329,22 @@ func (le *LoopEngine) Run(ctx context.Context, goal, taskID string, maxIteration
 		}
 
 		// Check if model signaled done or blocked
-		if state.TaskStatus == task.StatusDone || state.TaskStatus == task.StatusBlocked {
+		if (state.TaskStatus == task.StatusDone || state.TaskStatus == task.StatusBlocked) && len(toolCalls) == 0 {
 			state.Done = state.TaskStatus == task.StatusDone
 			state.Blocked = state.TaskStatus == task.StatusBlocked
 			state.FinishReason = state.TaskStatus
 			break
 		}
 
-		if len(resp.ToolCalls) == 0 {
+		if len(toolCalls) == 0 {
 			state.FinishReason = "done"
 			state.Done = true
 			break
 		}
 
-		state.Progress = fmt.Sprintf("iteration %d: run %d tool(s)", iter, len(resp.ToolCalls))
+		state.Progress = fmt.Sprintf("iteration %d: run %d tool(s)", iter, len(toolCalls))
 		// Execute tool calls
-		for _, tc := range resp.ToolCalls {
+		for _, tc := range toolCalls {
 			raw, err := le.toolRunner.Run(ctx, tc.Name, tc.Input)
 			output := formatToolOutput(tc.Name, raw, err)
 			success := err == nil
@@ -487,12 +516,38 @@ func (le *LoopEngine) BuildInitialMessages(goal string, sess *session.Session) (
 
 type stepEnvelope struct {
 	Actions []tool.ActionProposal `json:"actions"`
-	Tasks   []task.Update         `json:"tasks"`
+	Tasks   []task.Update        `json:"tasks"`
+	rawActs []map[string]any     `json:"-"`
 }
 
 func (le *LoopEngine) buildSystemPrompt(goal string) string {
 	var parts []string
-	parts = append(parts, `You are Marcus, a terminal-native coding assistant. Work methodically: read the project map and existing context first, identify the one most relevant file or subsystem, and prefer a targeted read/search over broad repository scans. Follow the current pattern, make the smallest safe change, verify the result, and capture durable repo facts in the project map when they will help future tasks. Return JSON with "message", "actions", and "tasks" fields. Keep "message" human-readable and concise. Mark tasks active when implementing, done when complete, blocked when stuck.`)
+
+	// Base Marcus instructions (always needed for proper tool use and JSON response)
+	marcosBase := `You are Marcus, a terminal-native coding assistant. You MUST use tools to accomplish goals - NEVER just describe what should be done, actually DO it.
+
+CRITICAL: When given a goal that requires creating files (like "create a README" or "build a project"), you MUST:
+1. Use write_file tool to create the actual files
+2. Use todo_write to track tasks for multi-step goals
+
+Return JSON with this exact structure:
+{
+  "message": "brief description of what you did",
+  "actions": [{"type": "tool_name", "input": {"arg1": "value1"}}],
+  "tasks": [{"id": "task1", "content": "task description", "status": "active"}]
+}
+
+Use "type" for tool name and "input" for tool arguments. Mark tasks active/done/blocked.`
+
+	// Use custom system prompt if set (e.g., for agent roles)
+	if le.customSystemPrompt != "" {
+		parts = append(parts, le.customSystemPrompt)
+		// Append Marcus base instructions so agents know about todo_write and JSON format
+		parts = append(parts, "\n\n---\n\n"+marcosBase)
+	} else {
+		parts = append(parts, marcosBase)
+	}
+
 	if goal != "" {
 		parts = append(parts, fmt.Sprintf("\n\nCurrent Goal: %s", goal))
 	}
@@ -613,11 +668,110 @@ func (le *LoopEngine) parseEnvelope(text string) stepEnvelope {
 	if start := strings.Index(text, "{"); start != -1 {
 		if end := strings.LastIndex(text, "}"); end > start {
 			if err := json.Unmarshal([]byte(text[start:end+1]), &env); err == nil {
+				if len(env.Actions) == 0 && len(env.rawActs) > 0 {
+					for _, raw := range env.rawActs {
+						proposal := tool.ActionProposal{}
+						if toolName, ok := raw["tool"].(string); ok {
+							proposal.Type = toolName
+						}
+						if args, ok := raw["args"].(map[string]any); ok {
+							proposal.Input = args
+							if path, ok := args["path"].(string); ok {
+								proposal.Path = path
+							}
+							if content, ok := args["content"].(string); ok {
+								proposal.Content = content
+							}
+							if command, ok := args["command"].(string); ok {
+								proposal.Command = command
+							}
+						}
+						if len(proposal.Type) > 0 {
+							env.Actions = append(env.Actions, proposal)
+						}
+					}
+				}
 				return env
 			}
 		}
 	}
 	return env
+}
+
+// parseXMLToolCalls parses XML-format tool calls like <write_file><path>...</path>...</write_file>
+func (le *LoopEngine) parseXMLToolCalls(text string) []provider.ToolCall {
+	var calls []provider.ToolCall
+
+	// Look for <tool_name>...</tool_name> patterns
+	for _, toolName := range []string{"write_file", "read_file", "edit_file", "run_command", "glob_files", "search_code"} {
+		openTag := "<" + toolName + ">"
+		closeTag := "</" + toolName + ">"
+
+		start := strings.Index(text, openTag)
+		for start != -1 {
+			end := strings.Index(text[start:], closeTag)
+			if end == -1 {
+				break
+			}
+			end += start
+
+			content := text[start+len(openTag) : end]
+
+			// Extract path if present
+			path := ""
+			if pathStart := strings.Index(content, "<path>"); pathStart != -1 {
+				pathEnd := strings.Index(content[pathStart:], "</path>")
+				if pathEnd != -1 {
+					path = content[pathStart+6 : pathStart+pathEnd]
+				}
+			}
+
+			// Extract content if present
+			fileContent := ""
+			if contentStart := strings.Index(content, "<content>"); contentStart != -1 {
+				contentEnd := strings.Index(content[contentStart:], "</content>")
+				if contentEnd != -1 {
+					fileContent = content[contentStart+9 : contentStart+contentEnd]
+				}
+			}
+
+			// Extract command if present
+			command := ""
+			if cmdStart := strings.Index(content, "<command>"); cmdStart != -1 {
+				cmdEnd := strings.Index(content[cmdStart:], "</command>")
+				if cmdEnd != -1 {
+					command = content[cmdStart+9 : cmdStart+cmdEnd]
+				}
+			}
+
+			// Build input JSON
+			inputMap := make(map[string]interface{})
+			if path != "" {
+				inputMap["path"] = path
+			}
+			if fileContent != "" {
+				inputMap["content"] = fileContent
+			}
+			if command != "" {
+				inputMap["command"] = command
+			}
+
+			inputJSON, _ := json.Marshal(inputMap)
+			calls = append(calls, provider.ToolCall{
+				ID:    fmt.Sprintf("xml-%s-%d", toolName, len(calls)),
+				Name:  toolName,
+				Input: inputJSON,
+			})
+
+			// Find next occurrence
+			start = strings.Index(text[end:], openTag)
+			if start != -1 {
+				start += end
+			}
+		}
+	}
+
+	return calls
 }
 
 func (le *LoopEngine) currentTaskStatus(updates []task.Update) string {

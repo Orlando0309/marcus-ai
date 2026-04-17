@@ -378,7 +378,7 @@ func (b *AgentMessageBus) RequestResponse(ctx context.Context, from, to string, 
 		Type:      "request",
 		Content:   content,
 		Timestamp: time.Now(),
-		Metadata:  map[string]any{"correlation_id": generateCorrelationID()},
+		Context:   map[string]any{"correlation_id": generateCorrelationID()},
 	}
 
 	if err := b.Send(req); err != nil {
@@ -400,8 +400,8 @@ func (b *AgentMessageBus) RequestResponse(ctx context.Context, from, to string, 
 			msgs := b.Receive(from)
 			for _, msg := range msgs {
 				if msg.From == to && msg.Type == "response" {
-					if corrID, ok := msg.Metadata["correlation_id"]; ok {
-						if corrID == req.Metadata["correlation_id"] {
+					if corrID, ok := msg.Context["correlation_id"]; ok {
+						if corrID == req.Context["correlation_id"] {
 							return msg.Content, nil
 						}
 					}
@@ -515,8 +515,8 @@ func (e *AgentCollaborationEngine) StartCollaboration(ctx context.Context, task 
 func (e *AgentCollaborationEngine) checkForConclusion(task *CollaborativeTask) string {
 	// Check last messages for conclusion markers
 	for _, msg := range task.ChatHistory {
-		if msg.Metadata != nil {
-			if conclusion, ok := msg.Metadata["conclusion"].(string); ok && conclusion != "" {
+		if msg.Context != nil {
+			if conclusion, ok := msg.Context["conclusion"].(string); ok && conclusion != "" {
 				return conclusion
 			}
 		}

@@ -67,15 +67,8 @@ type AgentResult struct {
 	Actions      []string `json:"actions,omitempty"`
 }
 
-// Message is an inter-agent message
-type Message struct {
-	From      string    `json:"from"`
-	To        string    `json:"to"`
-	Type      string    `json:"type"` // request, response, broadcast, status
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
-}
+// ProtocolMessage is an alias for the inter-agent message type from protocol
+type ProtocolMessage = Message
 
 // Specialized agent roles
 const (
@@ -97,6 +90,7 @@ type InMemoryAgentRegistry struct {
 	folders   *folder.FolderEngine
 	cfg       *config.Config
 	baseDir   string
+	loopEngine *flow.LoopEngine  // Base engine for executing agents
 }
 
 // runningAgent represents an actively running agent
@@ -108,7 +102,7 @@ type runningAgent struct {
 }
 
 // NewInMemoryAgentRegistry creates a new in-memory agent registry
-func NewInMemoryAgentRegistry(folders *folder.FolderEngine, cfg *config.Config, baseDir string) *InMemoryAgentRegistry {
+func NewInMemoryAgentRegistry(folders *folder.FolderEngine, cfg *config.Config, baseDir string, loopEng *flow.LoopEngine) *InMemoryAgentRegistry {
 	reg := &InMemoryAgentRegistry{
 		defs:      make(map[string]AgentDef),
 		agents:    make(map[string]*runningAgent),
@@ -116,6 +110,7 @@ func NewInMemoryAgentRegistry(folders *folder.FolderEngine, cfg *config.Config, 
 		folders:   folders,
 		cfg:       cfg,
 		baseDir:   baseDir,
+		loopEngine: loopEng,
 	}
 
 	// Load predefined agents
@@ -221,15 +216,20 @@ Be methodical in your debugging approach.`,
 		Name:        "architect",
 		Description: "Designs system architecture and interfaces",
 		Role:        RoleArchitect,
-		SystemPrompt: `You are an architect agent. Your job is to design clean architecture.
+		SystemPrompt: `You are an architect agent. Your job is to design and CREATE clean architecture.
+
+IMPORTANT: You MUST actually create files using the write_file tool. Do not just describe - actually write the files.
+
 Focus on:
 - System design and interfaces
 - Component relationships
 - API design
 - Scalability and maintainability
 
-Think carefully about trade-offs and document your decisions.`,
-		Tools:         []string{"read_file", "write_file", "list_files", "search_code"},
+Use write_file to create README.md, design docs, and architecture files.
+Use todo_write to track your tasks.
+Think carefully about trade-offs and document your decisions IN FILES.`,
+		Tools:         []string{"read_file", "write_file", "list_files", "search_code", "todo_write"},
 		MaxIterations: 20,
 		AutoApprove:   true,
 	}
@@ -311,26 +311,55 @@ func (r *InMemoryAgentRegistry) Spawn(role string, goal string, parent string, o
 
 // runAgent executes an agent's work
 func (r *InMemoryAgentRegistry) runAgent(ctx context.Context, id string, def AgentDef, goal string, opts SpawnOptions) {
-	// Create loop engine for this agent
-	// This is simplified - real implementation would set up proper dependencies
-	_ = def.MaxIterations
-	if opts.MaxIterations > 0 {
-		_ = opts.MaxIterations
-	}
-
 	result := AgentResult{
 		Actions: make([]string, 0),
 	}
 
-	// Simulate agent work (real implementation would use LoopEngine)
-	// For now, just mark as complete after a delay
-	select {
-	case <-ctx.Done():
-		result.Success = false
-		result.Error = ctx.Err().Error()
-	case <-time.After(100 * time.Millisecond):
-		result.Success = true
-		result.Summary = fmt.Sprintf("Agent %s completed goal: %s", def.Name, goal)
+	// Use the loop engine to execute the agent's goal
+	if r.loopEngine != nil {
+		agentCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+
+		maxIters := def.MaxIterations
+		if opts.MaxIterations > 0 {
+			maxIters = opts.MaxIterations
+		}
+		if maxIters == 0 {
+			maxIters = 20
+		}
+
+		// Set agent's system prompt, run, then restore
+		originalPrompt := r.loopEngine.GetSystemPrompt()
+		r.loopEngine.SetSystemPrompt(def.SystemPrompt)
+		state, err := r.loopEngine.Run(agentCtx, goal, id, maxIters)
+		r.loopEngine.SetSystemPrompt(originalPrompt)
+
+		if err != nil {
+			result.Success = false
+			result.Error = err.Error()
+			result.Summary = fmt.Sprintf("Agent %s failed: %v", def.Name, err)
+		} else if state != nil && state.Done {
+			result.Success = true
+			result.Summary = fmt.Sprintf("Agent %s completed: %s", def.Name, state.Progress)
+			result.Iterations = state.Iteration
+			for _, tr := range state.ToolResults {
+				result.Actions = append(result.Actions, tr.ToolName)
+			}
+		} else {
+			result.Success = false
+			result.Error = "Agent did not complete successfully"
+			result.Summary = fmt.Sprintf("Agent %s incomplete", def.Name)
+		}
+	} else {
+		// Fallback: simulate agent work
+		select {
+		case <-ctx.Done():
+			result.Success = false
+			result.Error = ctx.Err().Error()
+		case <-time.After(100 * time.Millisecond):
+			result.Success = true
+			result.Summary = fmt.Sprintf("Agent %s completed goal: %s", def.Name, goal)
+		}
 	}
 
 	// Update agent status
@@ -345,6 +374,13 @@ func (r *InMemoryAgentRegistry) runAgent(ctx context.Context, id string, def Age
 		agent.instance.Result = &result
 	}
 	r.mu.Unlock()
+}
+
+// SetLoopEngine sets the loop engine for agent execution
+func (r *InMemoryAgentRegistry) SetLoopEngine(eng *flow.LoopEngine) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loopEngine = eng
 }
 
 // Kill kills an agent
